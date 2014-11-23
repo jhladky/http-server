@@ -57,7 +57,6 @@ static void url_decode(char* url);
 static void debug(struct connection* cxn, uint32_t debug, const char* msg, ...);
 static inline void set_debug_level(uintptr_t debugLevel);
 static inline int make_nonblocking(int fd);
-static inline void safe_free(void* ptr, const char* str);
 
 int main(int argc, char* argv[]) {
    struct sockaddr_in6 me;
@@ -170,7 +169,6 @@ int main(int argc, char* argv[]) {
 }
 
 /* (1) Initialize connection struct to 0
- *     this is a trick we use for safe_free
  * (2) We can't generate an internal error b.c
  *     we can't communicate with the client...
  *     do just return and hope it doesn't happen again
@@ -433,8 +431,8 @@ static void close_connection(struct connection* cxn) {
       connections->erase(cxn->file);
       close(cxn->file);
    }
-   safe_free(cxn->request.filepath, "filepath");
-   safe_free(cxn->request.line, "request line");
+   free(cxn->request.filepath);
+   free(cxn->request.line);
    close(cxn->socket);
    connections->erase(cxn->socket);
    debug(cxn, DEBUG_INFO, "Freeing connection struct\n");
@@ -1068,13 +1066,6 @@ static void debug(struct connection* cxn, uint32_t debug, const char* msg, ...) 
    }
 }
 
-static inline void safe_free(void* ptr, const char* str) {
-   if(ptr) {
-      debug(NULL, DEBUG_INFO, "Freeing %s\n", str);
-      free(ptr);
-   }
-}
-
 static void clean_exit(int unused) {
    connections_t::iterator itr;
 
@@ -1084,8 +1075,8 @@ static void clean_exit(int unused) {
    for(itr = connections->begin(); itr != connections->end(); itr++) {
       struct connection* cxn = itr->second;
       if(cxn) {
-         safe_free(cxn->request.filepath, "request filepath");
-         safe_free(cxn->request.line, "request line");
+         free(cxn->request.filepath);
+         free(cxn->request.line);
          if(connections->count(cxn->file)) {
             connections->at(cxn->file) = NULL;
             munmap(cxn->fileBuf, cxn->response.contentLength);
