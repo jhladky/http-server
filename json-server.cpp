@@ -21,7 +21,7 @@
 #include <unordered_map>
 
 #include "smartalloc.h"
-#include "http-server.h"
+#include "json-server.h"
 
 static connections_t* connections = new connections_t(500);
 static FILE* accessLog; //don't like this being global
@@ -113,7 +113,6 @@ int main(int argc, char* argv[]) {
    }
 
    printf("HTTP server is using TCP port %d\n", ntohs(me.sin6_port));
-   printf("HTTPS server is using TCP port -1\n");
    fflush(stdout);
 
    if(listen(mySock, SOMAXCONN)) {
