@@ -1,0 +1,21 @@
+<HTML>
+<HEAD>
+<TITLE>Directory Listing</TITLE>
+</HEAD>
+<BODY>
+<H2>Directory Listing</H2><BR>
+<UL>
+<LI><A HREF="/f/1234567890">1234567890</A></LI>
+<LI><A HREF="/f/a">a</A></LI>
+<LI><A HREF="/f/a.png">a.png</A></LI>
+<LI><A HREF="/f/abcdefghijklmnopqrstuvwxyz">abcdefghijklmnopqrstuvwxyz</A></LI>
+<LI><A HREF="/f/b">b</A></LI>
+<LI><A HREF="/f/foo">foo</A></LI>
+</UL>
+</BODY>
+</HTML>
+HTTP/1.1 200 OK
+CT: CONTENT-TYPE:TEXT/HTML
+CE: 
+
+

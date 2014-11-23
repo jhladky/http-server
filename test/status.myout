@@ -1,0 +1,15 @@
+<HTML>
+<HEAD>
+<TITLE>Server Status</TITLE>
+</HEAD>
+<BODY>
+Author: Jacob Hladky<BR>
+Server Process ID: 3388<BR>
+Current Time: Wed Mar  5 14:22:27 2014
+<BR>
+<FORM METHOD="GET" ACTION="quit">
+<INPUT TYPE="submit" VALUE="Quit Server"/>
+<INPUT TYPE="HIDDEN" NAME="confirm" VALUE="1"/>
+</FORM>
+</BODY>
+</HTML>

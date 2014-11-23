@@ -26,3 +26,6 @@
 *.exe
 *.out
 *.app
+
+# Binaries
+http-server-Darwin-x86_64
