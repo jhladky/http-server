@@ -2,12 +2,6 @@
 #define __HTTP_SERVER_H
 
 
-#include <poll.h>
-#include "smartalloc.h"
-#include <unordered_map>
-#include <string>
-
-
 ///debug levels///
 #define DEBUG_SET 0xAAAAAAAA
 #define DEBUG_NONE 0
@@ -45,6 +39,7 @@
 
 
 ///all other defines///
+#define USEC_PER_SEC 100000.0
 #define MAX_HTTP_CODE 600
 #define HTTP_OK 200
 #define HTTP_NOTFOUND 404
@@ -58,10 +53,18 @@
 #define HTTP_CGISTATUS 1003
 #define HTTP_CGI 1004
 #define HTTP_GOODBYE 1005
+//JSON related
+#define DO_JSON 1006
+#define JSON_QUIT 1007
+#define JSON_ABOUT 1008
+#define JSON_IMPLEMENTED 1009
+#define JSON_STATUS 1010
+#define JSON_FORTUNE 1011
 #define LEN_INDEX_HTML 10
 #define LEN_DOCS 4
 #define LEN_CGI 4
-#define LEN_CGI_BIN 9
+#define LEN_CGI_BIN (strlen("/cgi-bin/"))
+#define LEN_JSON (strlen("/json/"))
 #define BODY_LISTING_BEGIN "<HTML>\n<HEAD>\n<TITLE>Directory Listing</TITLE>\n" \
    "</HEAD>\n<BODY>\n<H2>Directory Listing</H2><BR>\n<UL>\n"
 #define BODY_LISTING_END "</UL>\n</BODY>\n</HTML>\n"
@@ -79,7 +82,12 @@
 #define BODY_500 "<HTML><HEAD><TITLE>HTTP ERROR 500</TITLE></HEAD><BODY>" \
    "500 Internal Server Error.  Your request could not be completed due " \
    "to encountering HTTP error number 500.</BODY></HTML>"
-
+#define BODY_JSON_ABOUT "{\n\"author\":\"Jacob Hladky\", \"email\":\"jhladky@calpoly.edu\", \"major\": \"CPE\"}"
+#define BODY_JSON_QUIT "{\n\"result\":\"success\"\n}"
+//IMPLEMENTED_1 is a limited version is the full feature set
+#define BODY_JSON_IMPLEMENTED_1 "[\n{ \"feature\": \"about\", \"URL\": \"/json/about.json\"},{ \"feature\": \"quit\", \"URL\": \"/json/quit\"},{ \"feature\": \"status\", \"URL\": \"/json/status.json\"}]"
+#define BODY_JSON_IMPLEMENTED "[\n{ \"feature\": \"about\", \"URL\": \"/json/about.json\"},{ \"feature\": \"quit\", \"URL\": \"/json/quit\"},{ \"feature\": \"status\", \"URL\": \"/json/status.json\"},{ \"feature\": \"fortune\", \"URL\": \"/json/fortune.json\"}]"
+#define BODY_JSON_STATUS "{\n\"num_clients\": %d, \"num_requests\": %d, \"errors\": %d, \"uptime\": %lf, \"cpu_time\": %lf, \"memory_used\": %ld\n}"
 
 ///structs, unions, and enums///
 enum CMD {GET, ADD, MODIFY, REMOVE, CLEAN_UP};
@@ -137,8 +145,10 @@ static int make_response_header(struct response* response);
 static int make_request_header(struct env* env, struct request* request);
 static int fill_request_buffer(int socket, struct request* request);
 static int internal_response(struct response* response, int code);
+static int json_response(struct response* response, int code);
 static int generate_listing(char* filepath, struct response* response);
 static int cgi_request(struct env* env);
+static int json_request(struct env* env);
 static int fdarr_cntl(enum CMD cmd, ...);
 static int do_cgi(struct env* env);
 static int process_request(struct connection* cxn);

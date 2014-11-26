@@ -13,12 +13,15 @@
 #include <sys/stat.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
+#include <sys/time.h>
+#include <sys/resource.h>
 #include <netdb.h>
 #include <fcntl.h>
 #include <arpa/inet.h>
 #include <netinet/ip.h>
 
 #include <unordered_map>
+#include <string>
 
 #include "smartalloc.h"
 #include "json-server.h"
@@ -33,7 +36,14 @@ static ext_x_mime_t* ext2mime = new ext_x_mime_t({
       {"png", "image/png"},
       {"gif", "image/gif"},
       {"pdf", "application/pdf"},
+      {"json", "application/json"},
       {"txt", "text/plain"}});
+
+//lovin dat global data
+static int numClients = 0;
+static int numRequests = 0;
+static int errors = 0;
+static struct timeval startTime;
 
 
 int main(int argc, char* argv[]) {
@@ -45,6 +55,10 @@ int main(int argc, char* argv[]) {
    set_debug_level(DEBUG_INFO);
    add_handler(SIGINT, clean_exit);
    add_handler(SIGCHLD, wait_cgi);
+
+   if (gettimeofday(&startTime, NULL) == -1) {
+      pexit("gettimeofday");
+   }
 
    if ((accessLog = fopen("access.log", "a")) == NULL) {
       pexit("fopen");
@@ -93,6 +107,7 @@ int main(int argc, char* argv[]) {
    }
 
    if (fdarr_cntl(ADD, mySock, POLLIN) == MALLOC_FAILED) {
+      debug(NULL, DEBUG_CRITICAL, "malloc failed\n");
       exit(EXIT_FAILURE);
    }
 
@@ -171,6 +186,7 @@ static int process_mysock_events(int socket, short revents) {
       cxn->env.mySocket = cxn->socket;
       cxn->env.serverSocket = socket;
       debug(NULL, DEBUG_INFO, "Connected to  %s\n", inet_ntop(AF_INET6, &me.sin6_addr, v6buf, INET6_ADDRSTRLEN));
+      numClients++;
 
       fdarr_cntl(ADD, cxn->socket, POLLIN | POLLOUT);
       err = FDARR_MODIFIED;
@@ -201,6 +217,7 @@ static int process_cxsock_events(struct connection* cxn, short revents) {
          internal_response(&cxn->response, HTTP_INTERNAL);
          break;
       case 0:
+         numRequests++;
          res = process_request(cxn);
 
          if (res == HTTP_CGI) {
@@ -279,7 +296,7 @@ static int process_cxsock_events(struct connection* cxn, short revents) {
       debug(cxn, DEBUG_INFO, "cxsock, revent: POLLOUT, state: RESPONSE_FIN\n");
 
       log_access(cxn);
-      
+
       if (cxn->quit) {
          clean_exit(0);
       } else if (cxn->request.keepAlive && cxn->response.httpCode == HTTP_OK) {
@@ -325,6 +342,15 @@ static int process_request(struct connection* cxn) {
    response->usingDeflate = request->acceptDeflate;
    response->contentLength = request->contentLength;
 
+   //hacked this in for JSON
+   if (res == JSON_QUIT) {
+      json_response(response, res);
+      return CGI_QUIT;
+   } if (res >= JSON_ABOUT && res <= JSON_FORTUNE) {
+      json_response(response, res);
+      return INTERNAL_RESPONSE;
+   }
+   
    switch(res) {
    case HTTP_CGI:
       debug(cxn, DEBUG_INFO, "Making CGI response header\n");
@@ -404,8 +430,12 @@ static void close_connection(struct connection* cxn) {
       connections->erase(cxn->file);
       close(cxn->file);
    }
-   free(cxn->request.filepath);
-   free(cxn->request.line);
+   if (cxn->request.filepath) { ///THIS IS BAD FIXFIXFIX
+      free(cxn->request.filepath);
+   }
+   if (cxn->request.line) {
+      free(cxn->request.line);
+   }
    close(cxn->socket);
    connections->erase(cxn->socket);
    debug(cxn, DEBUG_INFO, "Freeing connection struct\n");
@@ -524,6 +554,59 @@ static int fdarr_cntl(enum CMD cmd, ...) {
    return err;
 }
 
+static int json_response(struct response* response, int code) {
+   int bytesWritten = 0;
+   long memUsage;
+   double cpuTime, timeDiff;
+   struct rusage usage;
+   struct timeval now;
+   char buf[BUF_LEN];
+   
+   switch(code) {
+   case JSON_IMPLEMENTED:
+      debug(NULL, DEBUG_INFO, "JSON: doing implemented.json\n");
+      bytesWritten = sprintf(buf, "%s", BODY_JSON_IMPLEMENTED_1);
+      break;
+   case JSON_ABOUT:
+      debug(NULL, DEBUG_INFO, "JSON: doing about.json\n");
+      bytesWritten = sprintf(buf, "%s", BODY_JSON_ABOUT);
+      break;
+   case JSON_QUIT:
+      debug(NULL, DEBUG_INFO, "JSON: doing quit\n");
+      bytesWritten = sprintf(buf, "%s", BODY_JSON_QUIT);
+      break;
+   case JSON_STATUS:
+      debug(NULL, DEBUG_INFO, "JSON: doing status.json\n");
+      if (getrusage(RUSAGE_SELF, &usage) == -1 ||
+          gettimeofday(&now, NULL) == -1) {
+         return internal_response(response, HTTP_INTERNAL);
+      }
+      memUsage = usage.ru_ixrss + usage.ru_idrss + usage.ru_isrss;
+      cpuTime = (usage.ru_utime.tv_sec * USEC_PER_SEC +
+                 usage.ru_stime.tv_sec * USEC_PER_SEC +
+                 usage.ru_utime.tv_usec +
+                 usage.ru_stime.tv_usec) / USEC_PER_SEC;
+      timeDiff = ((now.tv_sec * USEC_PER_SEC + now.tv_usec) -
+                  (startTime.tv_sec * USEC_PER_SEC + startTime.tv_usec)) / USEC_PER_SEC;
+      bytesWritten = sprintf(buf, BODY_JSON_STATUS, numClients, numRequests,
+                             errors, timeDiff, cpuTime, memUsage);
+      break;
+   default:
+   case JSON_FORTUNE:
+      debug(NULL, DEBUG_INFO, "JSON: doing fortune.json\n");
+      break;
+   }
+
+   response->httpCode = HTTP_OK;
+   response->contentLength = bytesWritten;
+   response->contentType = "application/json";
+
+   make_response_header(response);
+   memcpy(response->buffer + response->headerLength, buf, bytesWritten);
+   response->bytesUsed += bytesWritten;
+   return 0;
+}
+
 static int internal_response(struct response* response, int code) {
    int realCode = code;
    char buf[BUF_LEN];
@@ -532,14 +615,17 @@ static int internal_response(struct response* response, int code) {
 
    switch(code) {
    case HTTP_DENIED:
+      errors++;
       debug(NULL, DEBUG_INFO, "Sending error 403 Denied\n");
       bytesWritten = sprintf(buf, "%s", BODY_403);
       break;
    case HTTP_NOTFOUND:
+      errors++;
       debug(NULL, DEBUG_INFO, "Sending error 404 Not Found\n");
       bytesWritten = sprintf(buf, "%s", BODY_404);
       break;
    case HTTP_BADPARAMS:
+      errors++;
       debug(NULL, DEBUG_INFO, "Sending Bad Params message\n");
       bytesWritten = sprintf(buf, "Bad Params!");
       code = HTTP_OK;
@@ -565,6 +651,7 @@ static int internal_response(struct response* response, int code) {
       return 0;
    default:
    case HTTP_INTERNAL:
+      errors++;
       debug(NULL, DEBUG_WARNING, "Sending error 500 Internal\n");
       bytesWritten = sprintf(buf, "%s", BODY_500);
       break;
@@ -767,6 +854,13 @@ static int make_request_header(struct env* env, struct request* request) {
       return cgi_request(env);
    }
 
+   if (strstr(toks[1], "/json/")) { //check for json
+      debug(NULL, DEBUG_INFO, "json request: %s\n", toks[1]);
+      env->method = toks[0];
+      env->query = toks[1];
+      return json_request(env);
+   }
+   
    //one extra char is for the null btye
    //the other is for the possible '/' we might have to add
    request->filepath = (char *) calloc(1, strlen(toks[1]) +
@@ -865,6 +959,31 @@ static inline int make_nonblocking(int fd) {
    }
 
    return 0;
+}
+
+/*implemented.json - Returns a list of implemented features and associated URLs • about - Returns information about the author of the program
+• quit - Causes the server to quit
+• status - Returns server usage statistics
+*/
+
+static int json_request(struct env* env) {
+   if (strcmp(env->query, "/json/") == 0) {
+      return HTTP_NOTFOUND;
+   } else if (strcmp(env->query + LEN_JSON, "quit") == 0) {
+      return JSON_QUIT;
+   } else if (strcmp(env->query + LEN_JSON, "about.json") == 0) {
+      return JSON_ABOUT;
+   } else if (strcmp(env->query + LEN_JSON, "implemented.json") == 0) {
+      return JSON_IMPLEMENTED;
+   } else if (strcmp(env->query + LEN_JSON, "status.json") == 0) {
+      return JSON_STATUS;
+   } else if (strcmp(env->query + LEN_JSON, "fortune.json") == 0) {
+      return JSON_FORTUNE;
+   } 
+
+   debug(NULL, DEBUG_WARNING, "Unsupported JSON operation requested");
+   //return DO_JSON;
+   return HTTP_NOTFOUND;
 }
 
 // In pipes 0 is for writing, 1 is for reading
