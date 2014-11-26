@@ -1,7 +1,7 @@
 #!/bin/sh
 
-echo "Content-Type: text/html"
-echo "Foo-Header: bar"
-echo
-echo "<HTML><HEAD><TITLE>Test CGI Script</TITLE></HEAD>"
-echo "<BODY>Simple CGI Test!</BODY></HTML>"
+echo -n -e "Content-Type: text/html\r\n"
+echo -n -e "Foo-Header: bar\r\n"
+echo -n -e "\r\n"
+echo -n -e "<HTML><HEAD><TITLE>Test CGI Script</TITLE></HEAD>\r\n"
+echo -n -e "<BODY>Simple CGI Test!</BODY></HTML>\r\n"

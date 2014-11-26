@@ -35,28 +35,6 @@ static ext_x_mime_t* ext2mime = new ext_x_mime_t({
       {"pdf", "application/pdf"},
       {"txt", "text/plain"}});
 
-static int make_response_header(struct response* response);
-static int make_request_header(struct env* env, struct request* request);
-static int fill_request_buffer(int socket, struct request* request);
-static int internal_response(struct response* response, int code);
-static int generate_listing(char* filepath, struct response* response);
-static int cgi_request(struct env* env);
-static int fdarr_cntl(enum CMD cmd, ...);
-static int do_cgi(struct env* env);
-static int process_request(struct connection* cxn);
-static int process_mysock_events(int socket, short revents);
-static int process_cxfile_events(struct connection* csn, short revents);
-static int process_cxsock_events(struct connection* cxn, short revents);
-static void close_connection(struct connection* cxn);
-static void reset_connection(struct connection* cxn);
-static void clean_exit(int unused);
-static void wait_cgi(int unused);
-static void add_handler(int signal, void (*handlerFunc)(int));
-static void log_access(struct connection* cxn);
-static void url_decode(char* url);
-static void debug(struct connection* cxn, uint32_t debug, const char* msg, ...);
-static inline void set_debug_level(uintptr_t debugLevel);
-static inline int make_nonblocking(int fd);
 
 int main(int argc, char* argv[]) {
    struct sockaddr_in6 me;
@@ -68,98 +46,93 @@ int main(int argc, char* argv[]) {
    add_handler(SIGINT, clean_exit);
    add_handler(SIGCHLD, wait_cgi);
 
-   if((accessLog = fopen("access.log", "a")) == NULL) {
-      perror("fopen");
-      abort();
+   if ((accessLog = fopen("access.log", "a")) == NULL) {
+      pexit("fopen");
    }
 
-   if((mySock = socket(AF_INET6, SOCK_STREAM, 0)) == -1) {
-      perror("Opening socket failed");
-      abort();
+   if ((mySock = socket(AF_INET6, SOCK_STREAM, 0)) == -1) {
+      pexit("Opening socket failed");
    }
 
-   if(make_nonblocking(mySock)) {
-      abort();
+   if (make_nonblocking(mySock)) {
+      exit(EXIT_FAILURE);
    }
 
    memset(&me, 0, sizeof(me));
    me.sin6_family = AF_INET6;
-   if(argc > 1) {
-      if((res = inet_pton(AF_INET6, argv[1], &me.sin6_addr)) == -1) {
+   if (argc > 1) {
+      if ((res = inet_pton(AF_INET6, argv[1], &me.sin6_addr)) == -1) {
          debug(NULL, DEBUG_CRITICAL, "Error converting addr: %s\n", strerror(errno));
-         abort();
-      } else if(res == 0) {
+         exit(EXIT_FAILURE);
+      } else if (res == 0) {
          debug(NULL, DEBUG_WARNING, "Converting to v6 addr\n");
          strcpy(v6buf, "::ffff:");
          strcat(v6buf, argv[1]);
-         if(inet_pton(AF_INET6, v6buf, &me.sin6_addr) == -1) {
+         if (inet_pton(AF_INET6, v6buf, &me.sin6_addr) == -1) {
             debug(NULL, DEBUG_CRITICAL, "Error converting addr: %s\n", strerror(errno));
-            abort();
+            exit(EXIT_FAILURE);
          }
       }
    } else {
       me.sin6_addr = in6addr_any;
    }
 
-   if(bind(mySock, (struct sockaddr *) &me, sockSize)) {
-      perror("bind");
-      abort();
+   if (bind(mySock, (struct sockaddr *) &me, sockSize)) {
+      pexit("bind");
    }
 
-   if(getsockname(mySock, (struct sockaddr *) &me, &sockSize)) {
-      perror("getsockname");
-      abort();
+   if (getsockname(mySock, (struct sockaddr *) &me, &sockSize)) {
+      pexit("getsockname");
    }
 
    printf("HTTP server is using TCP port %d\n", ntohs(me.sin6_port));
    fflush(stdout);
 
-   if(listen(mySock, SOMAXCONN)) {
-      perror("listen");
-      abort();
+   if (listen(mySock, SOMAXCONN)) {
+      pexit("listen");
    }
 
-   if(fdarr_cntl(ADD, mySock, POLLIN) == MALLOC_FAILED) {
-      abort();
+   if (fdarr_cntl(ADD, mySock, POLLIN) == MALLOC_FAILED) {
+      exit(EXIT_FAILURE);
    }
 
    //the event loop
-   while(true) {
+   while (true) {
       struct pollfd* fds;
       nfds_t nfds;
       unsigned int i;
       int res, fd;
 
       fdarr_cntl(GET, &fds, &nfds);
-      if((res = poll(fds, nfds, -1)) == -1) {
+      if ((res = poll(fds, nfds, -1)) == -1) {
          debug(NULL, DEBUG_WARNING, "Poll: %s\n", strerror(errno));
          continue; //not a fan of this
       }
 
-      for(i = 0; i < nfds; i++) {
+      for (i = 0; i < nfds; i++) {
          fd = fds[i].fd;
 
-         if(fd != mySock && connections->count(fd) == 0) {
+         if (fd != mySock && connections->count(fd) == 0) {
             debug(NULL, DEBUG_CRITICAL, "Unrecognized fd(%d) in fdarr\n", fd);
-            abort();
+            exit(EXIT_FAILURE);
          }
 
-         if(fd == mySock) {
+         if (fd == mySock) {
             res = process_mysock_events(mySock, fds[i].revents);
-         } else if(fd == connections->at(fd)->socket) {
+         } else if (fd == connections->at(fd)->socket) {
             res = process_cxsock_events(connections->at(fd), fds[i].revents);
-         } else if(fd == connections->at(fd)->file) {
+         } else if (fd == connections->at(fd)->file) {
             res = process_cxfile_events(connections->at(fd), fds[i].revents);
          }
 
-         //if the fdarr was modified, break from the loop
+         //if  the fdarr was modified, break from the loop
          //and start over completely with the right nfds value
-         if(res == FDARR_MODIFIED) {
+         if (res == FDARR_MODIFIED) {
             debug(NULL, DEBUG_INFO, "Fdarr modified, breaking\n");
             break;
-         } else if(res == BAD_SOCKET) {
+         } else if (res == BAD_SOCKET) {
             debug(NULL, DEBUG_ERROR, "Error accepting socket connection\n");
-         } else if(res == MALLOC_FAILED) {
+         } else if (res == MALLOC_FAILED) {
             debug(NULL, DEBUG_ERROR, "Allocating connections struct failed\n");
          }
       }
@@ -180,15 +153,15 @@ static int process_mysock_events(int socket, short revents) {
    char v6buf[INET6_ADDRSTRLEN];
    int err = 0;
 
-   if(revents & POLLIN) {
+   if (revents & POLLIN) {
       debug(NULL, DEBUG_INFO, "mysock, revent: POLLIN, state: N/A\n");
       cxn = (struct connection *) calloc(1, sizeof(struct connection)); //(1)
-      if(cxn == NULL) {
+      if (cxn == NULL) {
          return MALLOC_FAILED;
       }
 
       cxn->socket = accept(socket, (struct sockaddr *) &me, &sockSize);
-      if(cxn->socket == -1) {
+      if (cxn->socket == -1) {
          perror("mysock accept");
          return BAD_SOCKET; //(2)
       }
@@ -212,7 +185,7 @@ static int process_cxsock_events(struct connection* cxn, short revents) {
    int res, err = 0;
    char* ptr;
 
-   if(revents & POLLIN && cxn->state == REQUEST_INP) {
+   if (revents & POLLIN && cxn->state == REQUEST_INP) {
       debug(cxn, DEBUG_INFO, "cxsock, revent: POLLIN, state: REQUEST_INP\n");
 
       switch(res = fill_request_buffer(cxn->socket, &cxn->request)) {
@@ -230,18 +203,18 @@ static int process_cxsock_events(struct connection* cxn, short revents) {
       case 0:
          res = process_request(cxn);
 
-         if(res == HTTP_CGI) {
+         if (res == HTTP_CGI) {
             cxn->cgi = true;
             cxn->state = INTERNAL;
-         } else if(res == CGI_QUIT) {
+         } else if (res == CGI_QUIT) {
             cxn->quit = true;
             cxn->state = INTERNAL;
-         } else if(res == INTERNAL_RESPONSE) {
+         } else if (res == INTERNAL_RESPONSE) {
             cxn->state = INTERNAL;
          } else {
             cxn->fileBuf = (char *) mmap(NULL, cxn->response.contentLength,
                                          PROT_READ, MAP_PRIVATE, cxn->file, 0);
-            if((intptr_t) cxn->fileBuf == -1) {
+            if ((intptr_t) cxn->fileBuf == -1) {
                cxn->state = INTERNAL;
                perror("mmap");
                close(cxn->file);
@@ -253,7 +226,7 @@ static int process_cxsock_events(struct connection* cxn, short revents) {
                connections->insert(std::make_pair(cxn->file, cxn));
                debug(cxn, DEBUG_INFO, "Adding fd to struct, #%d\n", cxn->file);
                ptr = strchr(cxn->request.filepath, '.');
-               if(ext2mime->count(std::string(ptr + 1))) {
+               if (ext2mime->count(std::string(ptr + 1))) {
                   cxn->response.contentType =
                      ext2mime->at(std::string(ptr +1)).c_str();
                }
@@ -265,14 +238,14 @@ static int process_cxsock_events(struct connection* cxn, short revents) {
       default:
          break;
       }
-   } else if(revents & POLLOUT && cxn->state == INTERNAL) {
+   } else if (revents & POLLOUT && cxn->state == INTERNAL) {
       debug(cxn, DEBUG_INFO, "cxsock, revent: POLLOUT, state: RESPONSE_HEA\n");
 
       res = write(cxn->socket,
                   cxn->response.buffer,
                   cxn->response.bytesToWrite);
       cxn->state = cxn->cgi ? CGI_FIL : RESPONSE_FIN;
-   } else if(revents & POLLOUT && cxn->state == RESPONSE_HEA) {
+   } else if (revents & POLLOUT && cxn->state == RESPONSE_HEA) {
       debug(cxn, DEBUG_INFO, "cxsock, revent: POLLOUT, state: RESPONSE_HEA\n");
 
       res = write(cxn->socket,
@@ -280,7 +253,7 @@ static int process_cxsock_events(struct connection* cxn, short revents) {
                   cxn->response.headerLength);
       cxn->response.bytesToWrite -= res;
       cxn->state = res == -1 ? RESPONSE_FIN : RESPONSE_FIL;
-   } else if(revents & POLLOUT && cxn->state == RESPONSE_FIL) {
+   } else if (revents & POLLOUT && cxn->state == RESPONSE_FIL) {
       debug(cxn, DEBUG_INFO, "cxsock, revent: POLLOUT, state: RESPONSE_INP\n");
       ptr = cxn->fileBuf + cxn->response.contentLength -
          cxn->response.bytesToWrite;
@@ -288,28 +261,28 @@ static int process_cxsock_events(struct connection* cxn, short revents) {
                   ptr,
                   cxn->response.bytesToWrite);
 
-      if(res == -1) {
+      if (res == -1) {
          cxn->state = RESPONSE_FIN;
       } else {
          cxn->response.bytesToWrite -= res;
          cxn->state = cxn->response.bytesToWrite ? LOAD_FILE : RESPONSE_FIN;
       }
-   } else if(revents & POLLOUT && cxn->state == CGI_FIL) {
-      if(do_cgi(&cxn->env) == HTTP_INTERNAL) {
+   } else if (revents & POLLOUT && cxn->state == CGI_FIL) {
+      if (do_cgi(&cxn->env) == HTTP_INTERNAL) {
          //internal server error here
          //we'd need to go backwards in the state machine
       }
       cxn->response.httpCode = HTTP_OK;
       cxn->state = RESPONSE_FIN;
       return process_cxsock_events(cxn, POLLOUT); //fix me later
-   } else if(revents & POLLOUT && cxn->state == RESPONSE_FIN) {
+   } else if (revents & POLLOUT && cxn->state == RESPONSE_FIN) {
       debug(cxn, DEBUG_INFO, "cxsock, revent: POLLOUT, state: RESPONSE_FIN\n");
 
       log_access(cxn);
       
-      if(cxn->quit) {
+      if (cxn->quit) {
          clean_exit(0);
-      } else if(cxn->request.keepAlive && cxn->response.httpCode == HTTP_OK) {
+      } else if (cxn->request.keepAlive && cxn->response.httpCode == HTTP_OK) {
          reset_connection(cxn);
          cxn->state = REQUEST_INP;
       } else {
@@ -318,7 +291,7 @@ static int process_cxsock_events(struct connection* cxn, short revents) {
          close_connection(cxn);
       }
       err = FDARR_MODIFIED;
-   } else if(revents & POLLHUP || revents & POLLERR || revents & POLLNVAL) {
+   } else if (revents & POLLHUP || revents & POLLERR || revents & POLLNVAL) {
       debug(cxn, DEBUG_INFO, "cxsock, revent: POLLHUP/POLLERR/POLLNVAL\n");
       close_connection(cxn);
       err = FDARR_MODIFIED;
@@ -332,7 +305,7 @@ static int process_cxsock_events(struct connection* cxn, short revents) {
 static int process_cxfile_events(struct connection* cxn, short revents) {
    int err = 0;
 
-   if(revents & POLLIN && cxn->state == LOAD_FILE) {
+   if (revents & POLLIN && cxn->state == LOAD_FILE) {
       debug(cxn, DEBUG_INFO, "cxfile, revent: POLLIN, state: LOAD_FILE\n");
       cxn->state = RESPONSE_FIL; //(1)
    }
@@ -368,7 +341,7 @@ static int process_request(struct connection* cxn) {
       internal_response(response, res);
       return INTERNAL_RESPONSE;
    case HTTP_GENLIST:
-      if(generate_listing(request->filepath, response)) {
+      if (generate_listing(request->filepath, response)) {
          debug(cxn, DEBUG_WARNING, "Generate listing error\n");
          internal_response(response, HTTP_INTERNAL);
       }
@@ -386,12 +359,12 @@ static int process_request(struct connection* cxn) {
    }
 
    res = open(request->filepath, O_RDONLY | O_NONBLOCK);
-   if(res  == -1 && errno == EACCES) {
+   if (res  == -1 && errno == EACCES) {
       internal_response(response, HTTP_DENIED);
       return INTERNAL_RESPONSE;
    }
 
-   if(res == -1) {
+   if (res == -1) {
       perror("open");
       internal_response(response, HTTP_INTERNAL);
       return INTERNAL_RESPONSE;
@@ -410,7 +383,7 @@ static void reset_connection(struct connection* cxn) {
    connections->erase(cxn->file);
    munmap(cxn->fileBuf, cxn->response.contentLength);
    debug(cxn, DEBUG_INFO, "Freeing filepath\n");
-   if(cxn->request.filepath) {
+   if (cxn->request.filepath) {
       free(cxn->request.filepath);
    }
    free(cxn->request.line);
@@ -426,7 +399,7 @@ static void close_connection(struct connection* cxn) {
    debug(cxn, DEBUG_INFO, "Closing connection...\n");
 
    fdarr_cntl(REMOVE, cxn->socket);
-   if(cxn->file) {
+   if (cxn->file) {
       fdarr_cntl(REMOVE, cxn->file);
       connections->erase(cxn->file);
       close(cxn->file);
@@ -442,25 +415,25 @@ static void close_connection(struct connection* cxn) {
 static int fill_request_buffer(int socket, struct request* request) {
    int bytesRead = 0;
 
-   if((bytesRead = read(socket,
+   if ((bytesRead = read(socket,
                         request->buffer + request->bytesUsed,
                         BUF_LEN - request->bytesUsed)) == -1) {
 
       perror("socket read");
       return UNRECOVERABLE;
-   } else if(bytesRead == 0) {
+   } else if (bytesRead == 0) {
       debug(NULL, DEBUG_WARNING, "Zero read from socket\n");
       return ZERO_READ;
    }
 
    request->bytesUsed += bytesRead;
 
-   if(request->bytesUsed >= BUF_LEN) {
+   if (request->bytesUsed >= BUF_LEN) {
       debug(NULL, DEBUG_WARNING, "Overflowed header buffer\n");
       return BUFFER_OVERFLOW;
    }
 
-   if(memmem(request->buffer, request->bytesUsed,
+   if (memmem(request->buffer, request->bytesUsed,
              "\r\n\r\n", strlen("\r\n\r\n")) == NULL) {
       debug(NULL, DEBUG_INFO, "Request incomplete\n");
       return REQUEST_INCOMPLETE;
@@ -482,13 +455,13 @@ static int fdarr_cntl(enum CMD cmd, ...) {
    va_list args;
 
    va_start(args, cmd);
-   if(nfds >= fdarrMaxSize - 1 || fds == NULL) {
+   if (nfds >= fdarrMaxSize - 1 || fds == NULL) {
       fdarrMaxSize *= 2;
       debug(NULL, DEBUG_INFO, "Expanding pollfd array from "
             "size %d to size %d\n", nfds, fdarrMaxSize);
       fds = (struct pollfd *) realloc(fds,
                                       fdarrMaxSize * sizeof(struct pollfd));
-      if(fds == NULL) {
+      if (fds == NULL) {
          debug(NULL, DEBUG_CRITICAL, "Allocating pollfd array failed\n");
          return MALLOC_FAILED;
       }
@@ -513,8 +486,8 @@ static int fdarr_cntl(enum CMD cmd, ...) {
       break;
    case MODIFY:
       fd = va_arg(args, int);
-      for(i = 0; i < nfds; i++) {
-         if(fds[i].fd == fd) {
+      for (i = 0; i < nfds; i++) {
+         if (fds[i].fd == fd) {
             break;
          }
       }
@@ -523,20 +496,20 @@ static int fdarr_cntl(enum CMD cmd, ...) {
       break;
    case REMOVE:
       fd = va_arg(args, int);
-      for(i = 0; i < nfds; i++) {
-         if(fds[i].fd == fd) {
+      for (i = 0; i < nfds; i++) {
+         if (fds[i].fd == fd) {
             break;
          }
       }
 
-      if(i == nfds) {
+      if (i == nfds) {
          debug(NULL, DEBUG_ERROR, "Entry not found in pollfd array\n");
          return STRUCT_NOT_FOUND;
       }
 
       debug(NULL, DEBUG_INFO, "Removing %dth entry(%d) from "
             "pollfd array\n", i, fd);
-      if(i != nfds - 1 && nfds > 1) {
+      if (i != nfds - 1 && nfds > 1) {
          memcpy(fds + i, fds + nfds - 1, sizeof(struct pollfd));
       }
       nfds--;
@@ -630,12 +603,12 @@ static int make_response_header(struct response* response) {
       break;
    }
 
-   if(response->contentType) {
+   if (response->contentType) {
       written += sprintf(response->buffer + written,
                          "Content-Type: %s\r\n", response->contentType);
    }
 
-   if(response->usingDeflate) {
+   if (response->usingDeflate) {
       written += sprintf(response->buffer + written,
                          "Content-Encoding: deflate\r\n");
    } else {
@@ -657,7 +630,7 @@ static int generate_listing(char* filepath, struct response* response) {
 
    debug(NULL, DEBUG_INFO, "In generate_listing\n");
 
-   if(str == NULL) {
+   if (str == NULL) {
       debug(NULL, DEBUG_ERROR, "Allocating filepath copy failed\n");
       return MALLOC_FAILED;
    }
@@ -666,13 +639,13 @@ static int generate_listing(char* filepath, struct response* response) {
    *(strstr(str, "/index.html")) = '\0';
    *(strstr(filepath, "/index.html")) = '\0';
    parent = opendir(filepath);
-   while((entry = readdir(parent))) {
+   while ((entry = readdir(parent))) {
       numDirEntries++;
    }
    closedir(parent);
 
    buf = (char *) calloc(1, AVG_LISTING_LEN * numDirEntries);
-   if(buf == NULL) {
+   if (buf == NULL) {
       debug(NULL, DEBUG_ERROR, "Allocating generate listing buffer failed\n");
       free(str);
       return MALLOC_FAILED;
@@ -682,8 +655,8 @@ static int generate_listing(char* filepath, struct response* response) {
    bytesWritten = sprintf(buf, "%s", BODY_LISTING_BEGIN);
    parent = opendir(filepath);
 
-   while((entry = readdir(parent))) {
-      if(strcmp(entry->d_name, ".") && strcmp(entry->d_name, "..")) {
+   while ((entry = readdir(parent))) {
+      if (strcmp(entry->d_name, ".") && strcmp(entry->d_name, "..")) {
          bytesWritten += sprintf(buf + bytesWritten,
                                  "<LI><A HREF=\"%s/%s\">%s</A></LI>\n",
                                  str, entry->d_name, entry->d_name);
@@ -717,7 +690,7 @@ static int make_request_header(struct env* env, struct request* request) {
    int i, numToks;
 
    lineEnd = (char * ) memmem(request->buffer, request->bytesUsed, "\r\n", 2);
-   if(lineEnd == NULL) {
+   if (lineEnd == NULL) {
       debug(NULL, DEBUG_WARNING, "Error processing request\n");
       return BAD_REQUEST;
    }
@@ -726,17 +699,17 @@ static int make_request_header(struct env* env, struct request* request) {
    debug(NULL, DEBUG_INFO, "Request: %s\n", buf);
 
    request->line = (char *) calloc(1, strlen(request->buffer) + 1);
-   if(request->line == NULL) {
+   if (request->line == NULL) {
       debug(NULL, DEBUG_ERROR, "Allocating request line failed\n");
       return MALLOC_FAILED;
    }
 
    strcpy(request->line, request->buffer);
 
-   for(i = 0, tok = strtok(buf + strlen(buf) + 2, "\r\n");
+   for (i = 0, tok = strtok(buf + strlen(buf) + 2, "\r\n");
        tok;
        i++, tok = strtok(NULL, "\r\n")) {
-      if(i >= MAX_TOKS) {
+      if (i >= MAX_TOKS) {
          debug(NULL, DEBUG_ERROR, "Overflowed header lines buffer\n");
          return BUFFER_OVERFLOW;
       }
@@ -744,8 +717,8 @@ static int make_request_header(struct env* env, struct request* request) {
    }
    numToks = i;
 
-   for(i = 0, tok = strtok(buf, " \n"); tok; i++, tok = strtok(NULL, " \n")) {
-      if(i >= MAX_TOKS) {
+   for (i = 0, tok = strtok(buf, " \n"); tok; i++, tok = strtok(NULL, " \n")) {
+      if (i >= MAX_TOKS) {
          debug(NULL, DEBUG_ERROR, "Overflowed header lines buffer\n");
          return BUFFER_OVERFLOW;
       }
@@ -754,40 +727,40 @@ static int make_request_header(struct env* env, struct request* request) {
 
    //we really need to change the way we determine keep-alive
    //http/1.1 specifies persistent unless specifically stated otherwise
-   for(i = 0; i < numToks; i++) {
-      if(strcasecmp(lines[i], "Connection: keep-alive") == 0) {
+   for (i = 0; i < numToks; i++) {
+      if (strcasecmp(lines[i], "Connection: keep-alive") == 0) {
          debug(NULL, DEBUG_INFO, "* HTTP Option: %s\n", lines[i]);
          request->keepAlive = true;
-      } else if(strcasestr(lines[i], "Accept-Encoding:")) {
-         if(strcasestr(lines[i] + strlen("Accept-Encoding:"), "deflate")) {
+      } else if (strcasestr(lines[i], "Accept-Encoding:")) {
+         if (strcasestr(lines[i] + strlen("Accept-Encoding:"), "deflate")) {
             debug(NULL, DEBUG_INFO, "* HTTP Option: %s\n", lines[i]);
             request->acceptDeflate = true;
          }
-      } else if(strcasestr(lines[i], "Referer:")) {
+      } else if (strcasestr(lines[i], "Referer:")) {
          debug(NULL, DEBUG_INFO, "* HTTP Option: %s\n", lines[i]);
          request->referer = lines[i] + strlen("Referer: ");
-      } else if(strcasestr(lines[i], "User-Agent:")) {
+      } else if (strcasestr(lines[i], "User-Agent:")) {
          debug(NULL, DEBUG_INFO, "* HTTP Option: %s\n", lines[i]);
          request->userAgent = lines[i] + strlen("User Agent: ");
       }
    }
 
-   if(request->referer == NULL) {
+   if (request->referer == NULL) {
       request->referer = "";
    }
 
-   if(request->userAgent == NULL) {
+   if (request->userAgent == NULL) {
       request->userAgent = "";
    }
 
    url_decode(toks[1]);
 
-   if(strcmp(toks[0], "GET")) {
+   if (strcmp(toks[0], "GET")) {
       debug(NULL, DEBUG_WARNING, "Server does not support operation\n");
       return HTTP_NOTFOUND; //this is what he does...no idea why
    }
 
-   if((strstr(toks[1], "/cgi-bin/"))) { //check for cgi
+   if ((strstr(toks[1], "/cgi-bin/"))) { //check for cgi
       debug(NULL, DEBUG_INFO, "cgi request: %s\n", toks[1]);
       env->method = toks[0];
       env->query = toks[1];
@@ -798,7 +771,7 @@ static int make_request_header(struct env* env, struct request* request) {
    //the other is for the possible '/' we might have to add
    request->filepath = (char *) calloc(1, strlen(toks[1]) +
                                        LEN_DOCS + LEN_INDEX_HTML + 2);
-   if(request->filepath == NULL) {
+   if (request->filepath == NULL) {
       debug(NULL, DEBUG_ERROR, "Allocating filepath failed\n");
       return MALLOC_FAILED;
    }
@@ -806,19 +779,19 @@ static int make_request_header(struct env* env, struct request* request) {
    strcpy(request->filepath, "docs");
    strcpy(request->filepath + strlen("docs"), toks[1]);
 
-   if(stat(request->filepath, &stats)) {
+   if (stat(request->filepath, &stats)) {
       debug(NULL, DEBUG_INFO, "File not found... generating 404\n");
       return HTTP_NOTFOUND; //this is a genuine 404
    }
 
-   if(S_ISDIR(stats.st_mode)) {
-      if(request->filepath[strlen(request->filepath) - 1] != '/') {
+   if (S_ISDIR(stats.st_mode)) {
+      if (request->filepath[strlen(request->filepath) - 1] != '/') {
          strcat(request->filepath, "/");
       }
       strcat(request->filepath, "index.html");
 
       //maybe change this to an access() call
-      if(stat(request->filepath, &stats)) {
+      if (stat(request->filepath, &stats)) {
          debug(NULL, DEBUG_INFO, "Generating directory listing\n");
          //this is where we generate the listing
          return HTTP_GENLIST;
@@ -842,9 +815,9 @@ static void url_decode(char* url) {
 
    hexBuf[2] = '\0';
 
-   while(urlPtr - url < len) {
+   while (urlPtr - url < len) {
       *tmpPtr = *urlPtr;
-      if(*urlPtr == '%') {
+      if (*urlPtr == '%') {
          hexBuf[0] = urlPtr[1];
          hexBuf[1] = urlPtr[2];
          hexValue = strtol(hexBuf, NULL, 16);
@@ -867,11 +840,11 @@ static void log_access(struct connection* cxn) {
    char timeBuf[NAME_BUF_LEN], v6buf[INET6_ADDRSTRLEN];
    time_t t = time(NULL);
 
-   if(strftime(timeBuf, NAME_BUF_LEN, "%d/%b/%Y:%X %z", localtime(&t)) == 0) {
+   if (strftime(timeBuf, NAME_BUF_LEN, "%d/%b/%Y:%X %z", localtime(&t)) == 0) {
       debug(NULL, DEBUG_WARNING, "Error formatting log string\n");
    }
 
-   if(getsockname(cxn->socket, (struct sockaddr *) &me, &sockSize)) {
+   if (getsockname(cxn->socket, (struct sockaddr *) &me, &sockSize)) {
       debug(NULL, DEBUG_WARNING, "Error getting sock name\n");
    }
 
@@ -886,7 +859,7 @@ static void log_access(struct connection* cxn) {
 }
 
 static inline int make_nonblocking(int fd) {
-   if(fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)) {
+   if (fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)) {
       debug(NULL, DEBUG_ERROR, "fd modification failed\n");
       return -1;
    }
@@ -904,28 +877,28 @@ static int cgi_request(struct env* env) {
    int len, i;
    bool hasParams = false;
 
-   if(strstr(env->query + LEN_CGI_BIN, "quit")) {
+   if (strstr(env->query + LEN_CGI_BIN, "quit")) {
       return strcmp(env->query + strlen("/cgi-bin/quit"), "?confirm=1") ?
          HTTP_BADPARAMS : CGI_QUIT;
    }
 
-   if(strcmp(env->query + LEN_CGI_BIN, "status") == 0) {
+   if (strcmp(env->query + LEN_CGI_BIN, "status") == 0) {
       debug(NULL, DEBUG_INFO, "cgi status requested\n");
       return HTTP_CGISTATUS;
    }
 
-   if(strcmp(env->query, "/cgi-bin/") == 0) {
+   if (strcmp(env->query, "/cgi-bin/") == 0) {
       return HTTP_NOTFOUND;
    }
 
    len = strlen(env->query) - LEN_CGI_BIN;
-   if((pathEnd = strchr(env->query, '?'))) {
+   if ((pathEnd = strchr(env->query, '?'))) {
       len -= (len - (pathEnd - (env->query + LEN_CGI_BIN)));
       hasParams = true;
    }
 
    env->filepath = (char *) calloc(1, len + LEN_CGI + 1);
-   if(env->filepath == NULL) {
+   if (env->filepath == NULL) {
       debug(NULL, DEBUG_ERROR, "Failed to allocate cgi filepath\n");
       return MALLOC_FAILED;
    }
@@ -935,7 +908,7 @@ static int cgi_request(struct env* env) {
    memcpy(env->filepath, "cgi/", LEN_CGI);
    debug(NULL, DEBUG_INFO, "cgi filepath: %s\n", env->filepath);
 
-   if(access(env->filepath, X_OK)) {
+   if (access(env->filepath, X_OK)) {
       free(env->filepath);
       switch(errno) {
       case ENOENT: return HTTP_NOTFOUND;
@@ -944,7 +917,7 @@ static int cgi_request(struct env* env) {
       }
    }
 
-   if(getsockname(env->serverSocket, (struct sockaddr *) &server, &sockSize) ||
+   if (getsockname(env->serverSocket, (struct sockaddr *) &server, &sockSize) ||
       getsockname(env->mySocket, (struct sockaddr *) &me, &sockSize)) {
       debug(NULL, DEBUG_WARNING, "Error getting server socket name\n");
       free(env->filepath);
@@ -952,13 +925,13 @@ static int cgi_request(struct env* env) {
    }
 
    envvarSpace = (char *) calloc(NUM_ENV_VARS, ENV_BUF_LEN);
-   if(envvarSpace == NULL) {
+   if (envvarSpace == NULL) {
       debug(NULL, DEBUG_ERROR, "Allocating envvar space failed\n");
       free(env->filepath);
       return MALLOC_FAILED;
    }
 
-   for(i = 0; i < NUM_ENV_VARS; i++) {
+   for (i = 0; i < NUM_ENV_VARS; i++) {
       env->envvars[i] = envvarSpace + i * ENV_BUF_LEN;
    }
 
@@ -990,17 +963,17 @@ static int cgi_request(struct env* env) {
 static int do_cgi(struct env* env) {
    debug(NULL, DEBUG_INFO, "CGI operation in progress\n");
 
-   if((env->childPid = fork()) == -1) {
+   if ((env->childPid = fork()) == -1) {
       debug(NULL, DEBUG_ERROR, "fork failed\n");
       free(env->filepath);
       return HTTP_INTERNAL;
-   } else if(env->childPid == 0) { //the child
+   } else if (env->childPid == 0) { //the child
       fcntl(env->mySocket, F_SETFL, fcntl(env->mySocket, F_GETFL) & ~O_NONBLOCK);
       dup2(env->mySocket, 1);
 
       execle(env->filepath, env->filepath, NULL, env->envvars);
       debug(NULL, DEBUG_ERROR, "Exec: %s\n", strerror(errno));
-      abort();
+      exit(EXIT_FAILURE);
    }
 
    free(env->filepath);
@@ -1018,7 +991,7 @@ static void preamble(struct sockaddr_in6* info, uint32_t debug) {
    char timeBuf[NAME_BUF_LEN], name[NAME_BUF_LEN], v6buf[INET6_ADDRSTRLEN];
    time_t t = time(NULL);
 
-   if(info) {
+   if (info) {
       snprintf(name, NAME_BUF_LEN, "%s/%d",
                inet_ntop(AF_INET6, &info->sin6_addr, v6buf, INET6_ADDRSTRLEN),
                htons(info->sin6_port));
@@ -1026,7 +999,7 @@ static void preamble(struct sockaddr_in6* info, uint32_t debug) {
       sprintf(name, "Unknown");
    }
 
-   if((int) strlen(name)  > nameLength) {
+   if ((int) strlen(name)  > nameLength) {
       nameLength = strlen(name);
    }
 
@@ -1047,18 +1020,18 @@ static void debug(struct connection* cxn, uint32_t debug, const char* msg, ...) 
    socklen_t sockSize = sizeof(struct sockaddr_in6);
    va_list args;
 
-   if(debug == DEBUG_SET) {
+   if (debug == DEBUG_SET) {
       debugLevel = (intptr_t) msg;
       return;
    }
 
-   if(cxn) {
-      if(getsockname(cxn->socket, (struct sockaddr *) &me, &sockSize)) {
+   if (cxn) {
+      if (getsockname(cxn->socket, (struct sockaddr *) &me, &sockSize)) {
          cxn = NULL;
       }
    }
 
-   if(debug <= debugLevel) {
+   if (debug <= debugLevel) {
       preamble(cxn ? &me : NULL, debug);
       va_start(args, msg);
       vfprintf(stderr, msg, args);
@@ -1072,12 +1045,12 @@ static void clean_exit(int unused) {
    fdarr_cntl(CLEAN_UP);
    fclose(accessLog);
 
-   for(itr = connections->begin(); itr != connections->end(); itr++) {
+   for (itr = connections->begin(); itr != connections->end(); itr++) {
       struct connection* cxn = itr->second;
-      if(cxn) {
+      if (cxn) {
          free(cxn->request.filepath);
          free(cxn->request.line);
-         if(connections->count(cxn->file)) {
+         if (connections->count(cxn->file)) {
             connections->at(cxn->file) = NULL;
             munmap(cxn->fileBuf, cxn->response.contentLength);
             close(cxn->file);
@@ -1098,8 +1071,8 @@ static void wait_cgi(int unused) {
 
    debug(NULL, DEBUG_INFO, "Child signal received\n");
 
-   if(waitpid(0, &childStatus, WNOHANG)) {
-      if(WIFEXITED(childStatus)) {
+   if (waitpid(0, &childStatus, WNOHANG)) {
+      if (WIFEXITED(childStatus)) {
          debug(NULL, DEBUG_INFO, "Child exits\n");
       }
    }
@@ -1112,8 +1085,12 @@ static void add_handler(int signal, void (*handlerFunc)(int)) {
    sa.sa_handler = handlerFunc;
    sigemptyset(&sa.sa_mask);
    sa.sa_flags = 0;
-   if(sigaction(signal, &sa, NULL) < 0)  {
-      perror("Adding sighandler failed");
-      abort(); //justified
+   if (sigaction(signal, &sa, NULL) < 0)  {
+      pexit("Adding sighandler failed");
    }
+}
+
+static inline void pexit(const char* str) {
+   perror(str);
+   exit(EXIT_FAILURE);
 }

@@ -53,7 +53,7 @@
 //these aren't HTTP error codes, but we pass them
 //into make_response anyway. kludgy, but unambiguous
 //as HTTP codes stop at 600
-#define HTTP_GENLIST 1001 //V these are internal response codes 
+#define HTTP_GENLIST 1001 //V these are internal response codes
 #define HTTP_BADPARAMS 1002
 #define HTTP_CGISTATUS 1003
 #define HTTP_CGI 1004
@@ -91,7 +91,7 @@ struct request {
    unsigned int bytesUsed;
    unsigned int contentLength;
    char* line;                  //the HTTP request line
-   const char* referer;         //we malloc line but we don't have to 
+   const char* referer;         //we malloc line but we don't have to
    const char* userAgent;       //malloc these so they're const
    char* filepath;
    bool keepAlive;
@@ -124,12 +124,38 @@ struct connection {
    int socket;               //fd of our socket
    int file;                 //fd of our file
    char* fileBuf;            //location of the file from mmap, maybe use sendfile... ?
-   struct request request;   
+   struct request request;
    struct response response;
    struct env env;
    bool quit; //i don't like this... find a better way
    bool cgi; //maybe make bool, cgi, and a few others into a flags int...
 } connection;
+
+
+///function prototypes///
+static int make_response_header(struct response* response);
+static int make_request_header(struct env* env, struct request* request);
+static int fill_request_buffer(int socket, struct request* request);
+static int internal_response(struct response* response, int code);
+static int generate_listing(char* filepath, struct response* response);
+static int cgi_request(struct env* env);
+static int fdarr_cntl(enum CMD cmd, ...);
+static int do_cgi(struct env* env);
+static int process_request(struct connection* cxn);
+static int process_mysock_events(int socket, short revents);
+static int process_cxfile_events(struct connection* csn, short revents);
+static int process_cxsock_events(struct connection* cxn, short revents);
+static void close_connection(struct connection* cxn);
+static void reset_connection(struct connection* cxn);
+static void clean_exit(int unused);
+static void wait_cgi(int unused);
+static void add_handler(int signal, void (*handlerFunc)(int));
+static void log_access(struct connection* cxn);
+static void url_decode(char* url);
+static void debug(struct connection* cxn, uint32_t debug, const char* msg, ...);
+static inline void set_debug_level(uintptr_t debugLevel);
+static inline int make_nonblocking(int fd);
+static inline void pexit(const char* str);
 
 
 ///c++ typedefs///
@@ -143,10 +169,10 @@ typedef std::unordered_map<
 
 typedef std::unordered_map<
    int,
-   struct connection *, 
-   std::hash<int>, 
-   std::equal_to<int>, 
-   STLsmartalloc<std::pair<const int, struct connection *>> 
-> connections_t; 
+   struct connection *,
+   std::hash<int>,
+   std::equal_to<int>,
+   STLsmartalloc<std::pair<const int, struct connection *>>
+> connections_t;
 
 #endif
