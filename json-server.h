@@ -4,20 +4,19 @@
 
 ///debug levels///
 #define DEBUG_SET 0xAAAAAAAA
-#define DEBUG_NONE 0
-#define DEBUG_CRITICAL 0
-#define DEBUG_ERROR 1
-#define DEBUG_WARNING 2
-#define DEBUG_INFO 3
+#define DEBUG_NONE 0            //no debugging. Error messages will still be displayed.
+#define DEBUG_ERROR 0           //only display error messages.
+#define DEBUG_WARNING 1         //display warning messages as well
+#define DEBUG_INFO 2            //display info messages as well
 
 
-///error codes///
+///return codes///
 #define UNSUPPORTED_OPERATION  -1
 #define STRUCT_SIZE_CHANGE     -2
 #define STRUCT_NOT_FOUND       -3
 #define UNSUPPORTED_HTTP_OP    -4
-#define REQUEST_INCOMPLETE     -5 //not really an error... whatevs
-#define REQUEST_FINISHED       -6 //also not an error haha
+#define REQUEST_INCOMPLETE     -5
+#define REQUEST_FINISHED       -6
 #define BUFFER_OVERFLOW        -7
 #define ZERO_READ              -8
 #define FDARR_MODIFIED         -9
@@ -164,7 +163,6 @@ static void log_access(struct connection* cxn);
 static void url_decode(char* url);
 static void debug(struct connection* cxn, uint32_t debug, const char* msg, ...);
 static inline void set_debug_level(uintptr_t debugLevel);
-static inline int make_nonblocking(int fd);
 static inline void pexit(const char* str);
 
 

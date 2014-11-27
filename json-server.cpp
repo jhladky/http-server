@@ -53,6 +53,7 @@ int main(int argc, char* argv[]) {
    socklen_t sockSize = sizeof(struct sockaddr_in6);
 
    set_debug_level(DEBUG_INFO);
+   //set_debug_level(DEBUG_NONE);
    add_handler(SIGINT, clean_exit);
    add_handler(SIGCHLD, wait_cgi);
 
@@ -68,22 +69,21 @@ int main(int argc, char* argv[]) {
       pexit("Opening socket failed");
    }
 
-   if (make_nonblocking(mySock)) {
-      exit(EXIT_FAILURE);
+   // Make the socket non-blocking.
+   if (fcntl(mySock, F_SETFL, fcntl(mySock, F_GETFL) | O_NONBLOCK) == -1) {
+      pexit("fcntl");
    }
 
    memset(&me, 0, sizeof(me));
    me.sin6_family = AF_INET6;
    if (argc > 1) {
       if ((res = inet_pton(AF_INET6, argv[1], &me.sin6_addr)) == -1) {
-         debug(NULL, DEBUG_CRITICAL, "Error converting addr: %s\n", strerror(errno));
-         exit(EXIT_FAILURE);
+         pexit("inet_pton");
       } else if (res == 0) {
-         debug(NULL, DEBUG_WARNING, "Converting to v6 addr\n");
-         strcpy(v6buf, "::ffff:");
-         strcat(v6buf, argv[1]);
-         if (inet_pton(AF_INET6, v6buf, &me.sin6_addr) == -1) {
-            debug(NULL, DEBUG_CRITICAL, "Error converting addr: %s\n", strerror(errno));
+         debug(NULL, DEBUG_WARNING, "Converting v4 to v6 addr\n");
+         snprintf(v6buf, INET6_ADDRSTRLEN, "::ffff:%s", argv[1]);
+         if (inet_pton(AF_INET6, v6buf, &me.sin6_addr) == 0) {
+            debug(NULL, DEBUG_ERROR, "Invalid address.\n");
             exit(EXIT_FAILURE);
          }
       }
@@ -107,7 +107,7 @@ int main(int argc, char* argv[]) {
    }
 
    if (fdarr_cntl(ADD, mySock, POLLIN) == MALLOC_FAILED) {
-      debug(NULL, DEBUG_CRITICAL, "malloc failed\n");
+      debug(NULL, DEBUG_ERROR, "malloc failed\n");
       exit(EXIT_FAILURE);
    }
 
@@ -128,7 +128,7 @@ int main(int argc, char* argv[]) {
          fd = fds[i].fd;
 
          if (fd != mySock && connections->count(fd) == 0) {
-            debug(NULL, DEBUG_CRITICAL, "Unrecognized fd(%d) in fdarr\n", fd);
+            debug(NULL, DEBUG_ERROR, "Unrecognized fd(%d) in fdarr\n", fd);
             exit(EXIT_FAILURE);
          }
 
@@ -146,9 +146,10 @@ int main(int argc, char* argv[]) {
             debug(NULL, DEBUG_INFO, "Fdarr modified, breaking\n");
             break;
          } else if (res == BAD_SOCKET) {
-            debug(NULL, DEBUG_ERROR, "Error accepting socket connection\n");
+            debug(NULL, DEBUG_WARNING, "Error accepting socket connection\n");
          } else if (res == MALLOC_FAILED) {
             debug(NULL, DEBUG_ERROR, "Allocating connections struct failed\n");
+            exit(EXIT_FAILURE);
          }
       }
    }  //should close mySock somewhere... ehhhhh
@@ -185,7 +186,8 @@ static int process_mysock_events(int socket, short revents) {
       cxn->response.httpCode = HTTP_OK;
       cxn->env.mySocket = cxn->socket;
       cxn->env.serverSocket = socket;
-      debug(NULL, DEBUG_INFO, "Connected to  %s\n", inet_ntop(AF_INET6, &me.sin6_addr, v6buf, INET6_ADDRSTRLEN));
+      debug(NULL, DEBUG_INFO, "Connected to  %s\n",
+            inet_ntop(AF_INET6, &me.sin6_addr, v6buf, INET6_ADDRSTRLEN));
       numClients++;
 
       fdarr_cntl(ADD, cxn->socket, POLLIN | POLLOUT);
@@ -350,7 +352,7 @@ static int process_request(struct connection* cxn) {
       json_response(response, res);
       return INTERNAL_RESPONSE;
    }
-   
+
    switch(res) {
    case HTTP_CGI:
       debug(cxn, DEBUG_INFO, "Making CGI response header\n");
@@ -376,7 +378,7 @@ static int process_request(struct connection* cxn) {
    case BAD_REQUEST:
    case BUFFER_OVERFLOW:
    case MALLOC_FAILED:
-      debug(cxn, DEBUG_ERROR, "Malloc failed, buffer overflow, "
+      debug(cxn, DEBUG_WARNING, "Malloc failed, buffer overflow, "
             "or bad request\n");
       internal_response(response, HTTP_INTERNAL);
       return INTERNAL_RESPONSE;
@@ -492,7 +494,7 @@ static int fdarr_cntl(enum CMD cmd, ...) {
       fds = (struct pollfd *) realloc(fds,
                                       fdarrMaxSize * sizeof(struct pollfd));
       if (fds == NULL) {
-         debug(NULL, DEBUG_CRITICAL, "Allocating pollfd array failed\n");
+         debug(NULL, DEBUG_WARNING, "Allocating pollfd array failed\n");
          return MALLOC_FAILED;
       }
       err = STRUCT_SIZE_CHANGE;
@@ -533,7 +535,7 @@ static int fdarr_cntl(enum CMD cmd, ...) {
       }
 
       if (i == nfds) {
-         debug(NULL, DEBUG_ERROR, "Entry not found in pollfd array\n");
+         debug(NULL, DEBUG_WARNING, "Entry not found in pollfd array\n");
          return STRUCT_NOT_FOUND;
       }
 
@@ -561,7 +563,7 @@ static int json_response(struct response* response, int code) {
    struct rusage usage;
    struct timeval now;
    char buf[BUF_LEN];
-   
+
    switch(code) {
    case JSON_IMPLEMENTED:
       debug(NULL, DEBUG_INFO, "JSON: doing implemented.json\n");
@@ -718,7 +720,7 @@ static int generate_listing(char* filepath, struct response* response) {
    debug(NULL, DEBUG_INFO, "In generate_listing\n");
 
    if (str == NULL) {
-      debug(NULL, DEBUG_ERROR, "Allocating filepath copy failed\n");
+      debug(NULL, DEBUG_WARNING, "Allocating filepath copy failed\n");
       return MALLOC_FAILED;
    }
 
@@ -733,7 +735,7 @@ static int generate_listing(char* filepath, struct response* response) {
 
    buf = (char *) calloc(1, AVG_LISTING_LEN * numDirEntries);
    if (buf == NULL) {
-      debug(NULL, DEBUG_ERROR, "Allocating generate listing buffer failed\n");
+      debug(NULL, DEBUG_WARNING, "Allocating generate listing buffer failed\n");
       free(str);
       return MALLOC_FAILED;
    }
@@ -787,7 +789,7 @@ static int make_request_header(struct env* env, struct request* request) {
 
    request->line = (char *) calloc(1, strlen(request->buffer) + 1);
    if (request->line == NULL) {
-      debug(NULL, DEBUG_ERROR, "Allocating request line failed\n");
+      debug(NULL, DEBUG_WARNING, "Allocating request line failed\n");
       return MALLOC_FAILED;
    }
 
@@ -797,7 +799,7 @@ static int make_request_header(struct env* env, struct request* request) {
        tok;
        i++, tok = strtok(NULL, "\r\n")) {
       if (i >= MAX_TOKS) {
-         debug(NULL, DEBUG_ERROR, "Overflowed header lines buffer\n");
+         debug(NULL, DEBUG_WARNING, "Overflowed header lines buffer\n");
          return BUFFER_OVERFLOW;
       }
       lines[i] = tok;
@@ -806,7 +808,7 @@ static int make_request_header(struct env* env, struct request* request) {
 
    for (i = 0, tok = strtok(buf, " \n"); tok; i++, tok = strtok(NULL, " \n")) {
       if (i >= MAX_TOKS) {
-         debug(NULL, DEBUG_ERROR, "Overflowed header lines buffer\n");
+         debug(NULL, DEBUG_WARNING, "Overflowed header lines buffer\n");
          return BUFFER_OVERFLOW;
       }
       toks[i] = tok;
@@ -860,13 +862,13 @@ static int make_request_header(struct env* env, struct request* request) {
       env->query = toks[1];
       return json_request(env);
    }
-   
+
    //one extra char is for the null btye
    //the other is for the possible '/' we might have to add
    request->filepath = (char *) calloc(1, strlen(toks[1]) +
                                        LEN_DOCS + LEN_INDEX_HTML + 2);
    if (request->filepath == NULL) {
-      debug(NULL, DEBUG_ERROR, "Allocating filepath failed\n");
+      debug(NULL, DEBUG_WARNING, "Allocating filepath failed\n");
       return MALLOC_FAILED;
    }
 
@@ -952,15 +954,6 @@ static void log_access(struct connection* cxn) {
            cxn->request.userAgent);
 }
 
-static inline int make_nonblocking(int fd) {
-   if (fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)) {
-      debug(NULL, DEBUG_ERROR, "fd modification failed\n");
-      return -1;
-   }
-
-   return 0;
-}
-
 /*implemented.json - Returns a list of implemented features and associated URLs • about - Returns information about the author of the program
 • quit - Causes the server to quit
 • status - Returns server usage statistics
@@ -979,7 +972,7 @@ static int json_request(struct env* env) {
       return JSON_STATUS;
    } else if (strcmp(env->query + LEN_JSON, "fortune.json") == 0) {
       return JSON_FORTUNE;
-   } 
+   }
 
    debug(NULL, DEBUG_WARNING, "Unsupported JSON operation requested");
    //return DO_JSON;
@@ -1018,7 +1011,7 @@ static int cgi_request(struct env* env) {
 
    env->filepath = (char *) calloc(1, len + LEN_CGI + 1);
    if (env->filepath == NULL) {
-      debug(NULL, DEBUG_ERROR, "Failed to allocate cgi filepath\n");
+      debug(NULL, DEBUG_WARNING, "Failed to allocate cgi filepath\n");
       return MALLOC_FAILED;
    }
 
@@ -1045,7 +1038,7 @@ static int cgi_request(struct env* env) {
 
    envvarSpace = (char *) calloc(NUM_ENV_VARS, ENV_BUF_LEN);
    if (envvarSpace == NULL) {
-      debug(NULL, DEBUG_ERROR, "Allocating envvar space failed\n");
+      debug(NULL, DEBUG_WARNING, "Allocating envvar space failed\n");
       free(env->filepath);
       return MALLOC_FAILED;
    }
@@ -1083,7 +1076,7 @@ static int do_cgi(struct env* env) {
    debug(NULL, DEBUG_INFO, "CGI operation in progress\n");
 
    if ((env->childPid = fork()) == -1) {
-      debug(NULL, DEBUG_ERROR, "fork failed\n");
+      debug(NULL, DEBUG_WARNING, "fork failed\n");
       free(env->filepath);
       return HTTP_INTERNAL;
    } else if (env->childPid == 0) { //the child
@@ -1091,7 +1084,7 @@ static int do_cgi(struct env* env) {
       dup2(env->mySocket, 1);
 
       execle(env->filepath, env->filepath, NULL, env->envvars);
-      debug(NULL, DEBUG_ERROR, "Exec: %s\n", strerror(errno));
+      debug(NULL, DEBUG_WARNING, "Exec: %s\n", strerror(errno));
       exit(EXIT_FAILURE);
    }
 
@@ -1125,7 +1118,6 @@ static void preamble(struct sockaddr_in6* info, uint32_t debug) {
    strftime(timeBuf, NAME_BUF_LEN, "%T", localtime(&t));
    fprintf(stderr, "[ %s: %-*s ] - ", timeBuf, nameLength, name);
    switch(debug) {
-   case(DEBUG_CRITICAL): fprintf(stderr, "CRITICAL "); break;
    case(DEBUG_ERROR): fprintf(stderr, "ERROR "); break;
    case(DEBUG_WARNING): fprintf(stderr, "WARNING "); break;
    case(DEBUG_INFO): fprintf(stderr, "INFO "); break;

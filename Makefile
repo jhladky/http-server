@@ -36,7 +36,7 @@ endif
 json-server-$(EXEC_SUFFIX): json-server.cpp smartalloc-$(EXEC_SUFFIX).o 
 	$(CPP) $(CPPFLAGS) $(OSINC) $(OSLIB) $(OSFLAGS) $(ARCHFLAGS) $< smartalloc-$(EXEC_SUFFIX).o -o $@
 
-all:  http-server-$(EXEC_SUFFIX)
+all: json-server-$(EXEC_SUFFIX)
 
 smartalloc-$(EXEC_SUFFIX).o: smartalloc.c
 	$(CC) $(CFLAGS) $(OSINC) $(OSFLAGS) $(ARCHFLAGS) -DSMARTALLOC_PEDANTIC -c $< -o $@
