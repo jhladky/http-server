@@ -4,10 +4,10 @@
 
 ///debug levels///
 #define DEBUG_SET 0xAAAAAAAA
-#define DEBUG_NONE 0            //no debugging. Error messages will still be displayed.
-#define DEBUG_ERROR 0           //only display error messages.
-#define DEBUG_WARNING 1         //display warning messages as well
-#define DEBUG_INFO 2            //display info messages as well
+#define DEBUG_NONE 0      //no debugging. Error messages will still be displayed.
+#define ERROR 0           //only display error messages.
+#define WARNING 1         //display warning messages as well
+#define INFO 2            //display info messages as well
 
 
 ///return codes///
@@ -152,7 +152,7 @@ static int fdarr_cntl(enum CMD cmd, ...);
 static int do_cgi(struct env* env);
 static int process_request(struct connection* cxn);
 static int process_mysock_events(int socket, short revents);
-static int process_cxfile_events(struct connection* csn, short revents);
+static int process_cxfile_events(struct connection* cxn, short revents);
 static int process_cxsock_events(struct connection* cxn, short revents);
 static void close_connection(struct connection* cxn);
 static void reset_connection(struct connection* cxn);
@@ -161,7 +161,7 @@ static void wait_cgi(int unused);
 static void add_handler(int signal, void (*handlerFunc)(int));
 static void log_access(struct connection* cxn);
 static void url_decode(char* url);
-static void debug(struct connection* cxn, uint32_t debug, const char* msg, ...);
+static void debug(uint32_t debug, const char* msg, ...);
 static inline void set_debug_level(uintptr_t debugLevel);
 static inline void pexit(const char* str);
 
