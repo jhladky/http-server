@@ -424,9 +424,6 @@ static void reset_connection(struct connection* cxn) {
    env = cxn->env;
    connections->erase(cxn->file);
    munmap(cxn->fileBuf, cxn->response.contentLength);
-   if (cxn->request.filepath) {
-      free(cxn->request.filepath);
-   }
    fdarr_cntl(REMOVE, cxn->file);
    close(cxn->file);
    memset(cxn, 0, sizeof(struct connection));
@@ -443,9 +440,6 @@ static void close_connection(struct connection* cxn) {
       fdarr_cntl(REMOVE, cxn->file);
       connections->erase(cxn->file);
       close(cxn->file);
-   }
-   if (cxn->request.filepath) { ///THIS IS BAD FIXFIXFIX
-      free(cxn->request.filepath);
    }
    close(cxn->socket);
    connections->erase(cxn->socket);
@@ -783,7 +777,7 @@ static int generate_listing(char* filepath, struct response* response) {
 
 //parse the request declaration
 //will modify the string in the request buffer via strtok!
-static int parse_request_declaration(struct request* request) {
+static int parse_request_declaration(struct request* request, char** filepath) {
    int i;
    char* tok;
    char* toks[NUM_REQ_DECL_PARTS];
@@ -806,7 +800,7 @@ static int parse_request_declaration(struct request* request) {
       return NOT_ALLOWED; //should result in a 405
    }
 
-   request->filepath = toks[1];
+   *filepath = toks[1];
    
    //the second part of the declaration says what HTTP version we're using
    if (strcasestr(toks[2], "HTTP/1.1")) {
@@ -832,19 +826,16 @@ static int make_request_header(struct env* env, struct request* request) {
    int i, numToks, res;
 
    //find the end of the first line of the request
-   if ((lineEnd = (char * ) memmem(request->buffer, request->bytesUsed, "\r\n", 2))
-       == NULL) {
+   if ((lineEnd = (char * )
+        memmem(request->buffer, request->bytesUsed, "\r\n", 2)) == NULL) {
       debug(DEBUG_WARNING, "Can't find HTTP request declaration\n");
       return BAD_REQUEST; //should result in a 400
    }
    *lineEnd = *(lineEnd + 1) = '\0';
 
-   if ((res = parse_request_declaration(request))) {
+   if ((res = parse_request_declaration(request, &tmp))) {
       return res;
    }
-
-   //save a pointer to where the filepath is
-   tmp = request->filepath;
 
    //split the remainder of the request up
    for (i = 0, tok = strtok(lineEnd + 2, "\r\n");
@@ -895,15 +886,6 @@ static int make_request_header(struct env* env, struct request* request) {
       debug(DEBUG_INFO, "json request: %s\n", tmp);
       env->query = request->filepath;
       return json_request(env);
-   }
-
-   //one extra char is for the null btye
-   //the other is for the possible '/' we might have to add
-   request->filepath = (char *) calloc(1, strlen(tmp) +
-                                       LEN_DOCS + LEN_INDEX_HTML + 2);
-   if (request->filepath == NULL) {
-      debug(DEBUG_WARNING, "Allocating filepath failed\n");
-      return MALLOC_FAILED;
    }
 
    strcpy(request->filepath, "docs");
@@ -1189,7 +1171,6 @@ static void clean_exit(int unused) {
    for (itr = connections->begin(); itr != connections->end(); itr++) {
       struct connection* cxn = itr->second;
       if (cxn) {
-         free(cxn->request.filepath);
          if (connections->count(cxn->file)) {
             connections->at(cxn->file) = NULL;
             munmap(cxn->fileBuf, cxn->response.contentLength);

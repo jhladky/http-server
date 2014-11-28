@@ -104,7 +104,7 @@ struct request {
    char buffer[BUF_LEN];
    enum REQUEST_TYPE type;      //this and the two below come from the request declaration
    int httpVersion;             //-1 for HTTP/0.9, 0 for HTTP/1.0, 1 for HTTP/1.1
-   char* filepath;              //this is malloced
+   char filepath[NAME_BUF_LEN];
    unsigned int bytesUsed;
    unsigned int contentLength;
    const char* referer;         //we malloc line but we don't have to...
@@ -164,7 +164,7 @@ static int process_request(struct connection* cxn);
 static int process_mysock_events(int socket, short revents);
 static int process_cxfile_events(struct connection* cxn, short revents);
 static int process_cxsock_events(struct connection* cxn, short revents);
-static int parse_request_declaration(struct request* request);
+static int parse_request_declaration(struct request* request, char** filepath);
 static void print_request(struct request* request); //fix the name on this
 static void close_connection(struct connection* cxn);
 static void reset_connection(struct connection* cxn);
