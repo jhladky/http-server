@@ -4,6 +4,7 @@
 
 ///debug levels///
 #define DEBUG_SET 0xAAAAAAAA
+
 #define DEBUG_NONE 0            //no debugging. Error messages will still be displayed.
 #define DEBUG_ERROR 0           //only display error messages.
 #define DEBUG_WARNING 1         //display warning messages as well
@@ -14,7 +15,7 @@
 #define UNSUPPORTED_OPERATION  -1
 #define STRUCT_SIZE_CHANGE     -2
 #define STRUCT_NOT_FOUND       -3
-#define UNSUPPORTED_HTTP_OP    -4
+#define NOT_ALLOWED            -4
 #define REQUEST_INCOMPLETE     -5
 #define REQUEST_FINISHED       -6
 #define BUFFER_OVERFLOW        -7
@@ -30,11 +31,14 @@
 
 ///limitations///
 #define BUF_LEN 1024
-#define NAME_BUF_LEN 30
+#define NAME_BUF_LEN 64
+#define ENV_BUF_LEN 64
 #define MAX_TOKS 100
 #define AVG_LISTING_LEN 100
 #define NUM_ENV_VARS 8
-#define ENV_BUF_LEN 50
+#define NUM_DEBUG_LEVELS 3
+#define NUM_HTTP_REQUEST_TYPES 4
+#define NUM_REQ_DECL_PARTS 3
 
 
 ///all other defines///
@@ -93,25 +97,31 @@ enum CMD {GET, ADD, MODIFY, REMOVE, CLEAN_UP};
 
 enum STATE {REQUEST_INP, LOAD_FILE, INTERNAL, RESPONSE_HEA, RESPONSE_FIL, CGI_FIL, RESPONSE_FIN};
 
+enum REQUEST_TYPE {HTTP_GET, HTTP_PUT, HTTP_POST, HTTP_DELETE};
+//enum RESPONSE_TYPE {OK, BAD_REQUEST, METHOD_NOT_ALLOWED, FORBIDDEN, NOT_FOUND, INTERNAL_ERROR}
+
 struct request {
    char buffer[BUF_LEN];
+   enum REQUEST_TYPE type;      //this and the two below come from the request declaration
+   int httpVersion;             //-1 for HTTP/0.9, 0 for HTTP/1.0, 1 for HTTP/1.1
+   char filepath[NAME_BUF_LEN];
    unsigned int bytesUsed;
    unsigned int contentLength;
-   char* line;                  //the HTTP request line
-   const char* referer;         //we malloc line but we don't have to
-   const char* userAgent;       //malloc these so they're const
-   char* filepath;
+   const char* referer;         //we malloc line but we don't have to...
+   const char* userAgent;       //...malloc these so they're const
    bool keepAlive;
    bool acceptDeflate;
 } request;
 
 struct response {
    char buffer[BUF_LEN];
+   //enum RESPONSE_TYPE type;
    unsigned int bytesUsed;
    unsigned int contentLength;
    unsigned int headerLength;
    const char* contentType; //get this from the file ext
    bool usingDeflate;
+   bool keepAlive;
    unsigned short httpCode; //200, 403, 404, etc.
    unsigned int bytesToWrite;
 } response;
@@ -122,7 +132,7 @@ struct env {
    char* query;
    char* envvars[NUM_ENV_VARS + 1]; //add 1 for the NULL terminator
    int childPid;
-   int mySocket;  //a copy of the connection socket
+   int mySocket;  //a copy of the connection socket... rename to cxnSocket
    int serverSocket; //a copy of the server's socket
 } env;
 
@@ -152,8 +162,10 @@ static int fdarr_cntl(enum CMD cmd, ...);
 static int do_cgi(struct env* env);
 static int process_request(struct connection* cxn);
 static int process_mysock_events(int socket, short revents);
-static int process_cxfile_events(struct connection* csn, short revents);
+static int process_cxfile_events(struct connection* cxn, short revents);
 static int process_cxsock_events(struct connection* cxn, short revents);
+static int parse_request_declaration(struct request* request, char** filepath);
+static void print_request(struct request* request); //fix the name on this
 static void close_connection(struct connection* cxn);
 static void reset_connection(struct connection* cxn);
 static void clean_exit(int unused);
@@ -161,7 +173,9 @@ static void wait_cgi(int unused);
 static void add_handler(int signal, void (*handlerFunc)(int));
 static void log_access(struct connection* cxn);
 static void url_decode(char* url);
-static void debug(struct connection* cxn, uint32_t debug, const char* msg, ...);
+static void debug(uint32_t debug, const char* msg, ...);
+static char* request_declaration_to_string(const struct request* request); //fix the name on this
+static inline const char* bool_to_string(bool b);
 static inline void set_debug_level(uintptr_t debugLevel);
 static inline void pexit(const char* str);
 

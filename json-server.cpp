@@ -80,10 +80,10 @@ int main(int argc, char* argv[]) {
       if ((res = inet_pton(AF_INET6, argv[1], &me.sin6_addr)) == -1) {
          pexit("inet_pton");
       } else if (res == 0) {
-         debug(NULL, DEBUG_WARNING, "Converting v4 to v6 addr\n");
+         debug(DEBUG_WARNING, "Converting v4 to v6 addr\n");
          snprintf(v6buf, INET6_ADDRSTRLEN, "::ffff:%s", argv[1]);
          if (inet_pton(AF_INET6, v6buf, &me.sin6_addr) == 0) {
-            debug(NULL, DEBUG_ERROR, "Invalid address.\n");
+            debug(DEBUG_ERROR, "Invalid address.\n");
             exit(EXIT_FAILURE);
          }
       }
@@ -107,7 +107,7 @@ int main(int argc, char* argv[]) {
    }
 
    if (fdarr_cntl(ADD, mySock, POLLIN) == MALLOC_FAILED) {
-      debug(NULL, DEBUG_ERROR, "malloc failed\n");
+      debug(DEBUG_ERROR, "malloc failed\n");
       exit(EXIT_FAILURE);
    }
 
@@ -120,7 +120,7 @@ int main(int argc, char* argv[]) {
 
       fdarr_cntl(GET, &fds, &nfds);
       if ((res = poll(fds, nfds, -1)) == -1) {
-         debug(NULL, DEBUG_WARNING, "Poll: %s\n", strerror(errno));
+         debug(DEBUG_WARNING, "Poll: %s\n", strerror(errno));
          continue; //not a fan of this
       }
 
@@ -128,7 +128,7 @@ int main(int argc, char* argv[]) {
          fd = fds[i].fd;
 
          if (fd != mySock && connections->count(fd) == 0) {
-            debug(NULL, DEBUG_ERROR, "Unrecognized fd(%d) in fdarr\n", fd);
+            debug(DEBUG_ERROR, "Unrecognized fd(%d) in fdarr\n", fd);
             exit(EXIT_FAILURE);
          }
 
@@ -143,16 +143,17 @@ int main(int argc, char* argv[]) {
          //if  the fdarr was modified, break from the loop
          //and start over completely with the right nfds value
          if (res == FDARR_MODIFIED) {
-            debug(NULL, DEBUG_INFO, "Fdarr modified, breaking\n");
+            debug(DEBUG_INFO, "Fdarr modified, breaking\n");
             break;
          } else if (res == BAD_SOCKET) {
-            debug(NULL, DEBUG_WARNING, "Error accepting socket connection\n");
+            debug(DEBUG_WARNING, "Error accepting socket connection\n");
          } else if (res == MALLOC_FAILED) {
-            debug(NULL, DEBUG_ERROR, "Allocating connections struct failed\n");
+            debug(DEBUG_ERROR, "Allocating connections struct failed\n");
+            //maybe change this behavior in the future
             exit(EXIT_FAILURE);
          }
       }
-   }  //should close mySock somewhere... ehhhhh
+   }
 
    return 0;
 }
@@ -170,7 +171,7 @@ static int process_mysock_events(int socket, short revents) {
    int err = 0;
 
    if (revents & POLLIN) {
-      debug(NULL, DEBUG_INFO, "mysock, revent: POLLIN, state: N/A\n");
+      debug(DEBUG_INFO, "mysock, revent: POLLIN, state: N/A\n");
       cxn = (struct connection *) calloc(1, sizeof(struct connection)); //(1)
       if (cxn == NULL) {
          return MALLOC_FAILED;
@@ -186,14 +187,14 @@ static int process_mysock_events(int socket, short revents) {
       cxn->response.httpCode = HTTP_OK;
       cxn->env.mySocket = cxn->socket;
       cxn->env.serverSocket = socket;
-      debug(NULL, DEBUG_INFO, "Connected to  %s\n",
+      debug(DEBUG_INFO, "Connected to  %s\n",
             inet_ntop(AF_INET6, &me.sin6_addr, v6buf, INET6_ADDRSTRLEN));
       numClients++;
 
       fdarr_cntl(ADD, cxn->socket, POLLIN | POLLOUT);
       err = FDARR_MODIFIED;
       connections->insert(std::make_pair(cxn->socket, cxn));
-      debug(cxn, DEBUG_INFO, "Allocated connection struct(%d)\n", cxn->socket);
+      debug(DEBUG_INFO, "Allocated connection struct(%d)\n", cxn->socket);
    }
 
    return err;
@@ -204,18 +205,19 @@ static int process_cxsock_events(struct connection* cxn, short revents) {
    char* ptr;
 
    if (revents & POLLIN && cxn->state == REQUEST_INP) {
-      debug(cxn, DEBUG_INFO, "cxsock, revent: POLLIN, state: REQUEST_INP\n");
+      debug(DEBUG_INFO, "cxsock, revent: POLLIN, state: REQUEST_INP\n");
 
       switch(res = fill_request_buffer(cxn->socket, &cxn->request)) {
       case ZERO_READ:
-         debug(cxn, DEBUG_INFO, "Zero read, closing connection\n");
+         debug(DEBUG_INFO, "Zero read, closing connection\n");
          close_connection(cxn);
          err = FDARR_MODIFIED;
          break;
       case BUFFER_OVERFLOW:
          //fix this for real-world later
          cxn->state = INTERNAL;
-         debug(cxn, DEBUG_WARNING, "Overflowed request header buffer\n");
+         debug(DEBUG_WARNING, "Overflowed request header buffer\n");
+         cxn->response.keepAlive = cxn->request.keepAlive;
          internal_response(&cxn->response, HTTP_INTERNAL);
          break;
       case 0:
@@ -237,19 +239,21 @@ static int process_cxsock_events(struct connection* cxn, short revents) {
                cxn->state = INTERNAL;
                perror("mmap");
                close(cxn->file);
+               cxn->response.keepAlive = cxn->request.keepAlive;
                internal_response(&cxn->response, HTTP_INTERNAL);
             } else {
                cxn->state = RESPONSE_HEA;
                fdarr_cntl(ADD, cxn->file, POLLIN);
                err = FDARR_MODIFIED;
                connections->insert(std::make_pair(cxn->file, cxn));
-               debug(cxn, DEBUG_INFO, "Adding fd to struct, #%d\n", cxn->file);
+               debug(DEBUG_INFO, "Adding fd to struct, #%d\n", cxn->file);
                ptr = strchr(cxn->request.filepath, '.');
                if (ext2mime->count(std::string(ptr + 1))) {
                   cxn->response.contentType =
                      ext2mime->at(std::string(ptr +1)).c_str();
                }
 
+               cxn->response.keepAlive = cxn->request.keepAlive;
                make_response_header(&cxn->response);
             }
          }
@@ -258,14 +262,14 @@ static int process_cxsock_events(struct connection* cxn, short revents) {
          break;
       }
    } else if (revents & POLLOUT && cxn->state == INTERNAL) {
-      debug(cxn, DEBUG_INFO, "cxsock, revent: POLLOUT, state: RESPONSE_HEA\n");
+      debug(DEBUG_INFO, "cxsock, revent: POLLOUT, state: RESPONSE_HEA\n");
 
       res = write(cxn->socket,
                   cxn->response.buffer,
                   cxn->response.bytesToWrite);
       cxn->state = cxn->cgi ? CGI_FIL : RESPONSE_FIN;
    } else if (revents & POLLOUT && cxn->state == RESPONSE_HEA) {
-      debug(cxn, DEBUG_INFO, "cxsock, revent: POLLOUT, state: RESPONSE_HEA\n");
+      debug(DEBUG_INFO, "cxsock, revent: POLLOUT, state: RESPONSE_HEA\n");
 
       res = write(cxn->socket,
                   cxn->response.buffer,
@@ -273,7 +277,7 @@ static int process_cxsock_events(struct connection* cxn, short revents) {
       cxn->response.bytesToWrite -= res;
       cxn->state = res == -1 ? RESPONSE_FIN : RESPONSE_FIL;
    } else if (revents & POLLOUT && cxn->state == RESPONSE_FIL) {
-      debug(cxn, DEBUG_INFO, "cxsock, revent: POLLOUT, state: RESPONSE_INP\n");
+      debug(DEBUG_INFO, "cxsock, revent: POLLOUT, state: RESPONSE_INP\n");
       ptr = cxn->fileBuf + cxn->response.contentLength -
          cxn->response.bytesToWrite;
       res = write(cxn->socket,
@@ -295,7 +299,7 @@ static int process_cxsock_events(struct connection* cxn, short revents) {
       cxn->state = RESPONSE_FIN;
       return process_cxsock_events(cxn, POLLOUT); //fix me later
    } else if (revents & POLLOUT && cxn->state == RESPONSE_FIN) {
-      debug(cxn, DEBUG_INFO, "cxsock, revent: POLLOUT, state: RESPONSE_FIN\n");
+      debug(DEBUG_INFO, "cxsock, revent: POLLOUT, state: RESPONSE_FIN\n");
 
       log_access(cxn);
 
@@ -305,13 +309,13 @@ static int process_cxsock_events(struct connection* cxn, short revents) {
          reset_connection(cxn);
          cxn->state = REQUEST_INP;
       } else {
-         debug(cxn, DEBUG_INFO, "Keep alive not specified or "
+         debug(DEBUG_INFO, "Keep alive not specified or "
                "http error encountered; Closing connection\n");
          close_connection(cxn);
       }
       err = FDARR_MODIFIED;
    } else if (revents & POLLHUP || revents & POLLERR || revents & POLLNVAL) {
-      debug(cxn, DEBUG_INFO, "cxsock, revent: POLLHUP/POLLERR/POLLNVAL\n");
+      debug(DEBUG_INFO, "cxsock, revent: POLLHUP/POLLERR/POLLNVAL\n");
       close_connection(cxn);
       err = FDARR_MODIFIED;
    }
@@ -325,7 +329,7 @@ static int process_cxfile_events(struct connection* cxn, short revents) {
    int err = 0;
 
    if (revents & POLLIN && cxn->state == LOAD_FILE) {
-      debug(cxn, DEBUG_INFO, "cxfile, revent: POLLIN, state: LOAD_FILE\n");
+      debug(DEBUG_INFO, "cxfile, revent: POLLIN, state: LOAD_FILE\n");
       cxn->state = RESPONSE_FIL; //(1)
    }
 
@@ -338,8 +342,10 @@ static int process_request(struct connection* cxn) {
    struct response* response = &cxn->response;
    int res;
 
-   debug(cxn, DEBUG_INFO, "Processing request buffer\n");
+   debug(DEBUG_INFO, "Processing request buffer\n");
    res = make_request_header(env, request);
+
+   print_request(request);
 
    response->usingDeflate = request->acceptDeflate;
    response->contentLength = request->contentLength;
@@ -349,37 +355,43 @@ static int process_request(struct connection* cxn) {
       json_response(response, res);
       return CGI_QUIT;
    } if (res >= JSON_ABOUT && res <= JSON_FORTUNE) {
+      cxn->response.keepAlive = cxn->request.keepAlive;
       json_response(response, res);
       return INTERNAL_RESPONSE;
    }
 
    switch(res) {
    case HTTP_CGI:
-      debug(cxn, DEBUG_INFO, "Making CGI response header\n");
+      debug(DEBUG_INFO, "Making CGI response header\n");
+      cxn->response.keepAlive = cxn->request.keepAlive;
       internal_response(response, res);
       return HTTP_CGI;
    case CGI_QUIT:
-      debug(cxn, DEBUG_INFO, "Received quit, starting exit process\n");
+      debug(DEBUG_INFO, "Received quit, starting exit process\n");
+      cxn->response.keepAlive = cxn->request.keepAlive;
       internal_response(response, HTTP_GOODBYE);
       return CGI_QUIT;
    case HTTP_NOTFOUND:
    case HTTP_DENIED: //make the non-cgi open do this as well
    case HTTP_CGISTATUS:
    case HTTP_BADPARAMS:
+      cxn->response.keepAlive = cxn->request.keepAlive;
       internal_response(response, res);
       return INTERNAL_RESPONSE;
    case HTTP_GENLIST:
       if (generate_listing(request->filepath, response)) {
-         debug(cxn, DEBUG_WARNING, "Generate listing error\n");
+         debug(DEBUG_WARNING, "Generate listing error\n");
+         cxn->response.keepAlive = cxn->request.keepAlive;
          internal_response(response, HTTP_INTERNAL);
       }
       return INTERNAL_RESPONSE;
    default:
    case BAD_REQUEST:
+   case NOT_ALLOWED:
    case BUFFER_OVERFLOW:
    case MALLOC_FAILED:
-      debug(cxn, DEBUG_WARNING, "Malloc failed, buffer overflow, "
-            "or bad request\n");
+      debug(DEBUG_WARNING, "Some misc error.\n");
+      cxn->response.keepAlive = cxn->request.keepAlive;
       internal_response(response, HTTP_INTERNAL);
       return INTERNAL_RESPONSE;
    case 0:
@@ -388,12 +400,14 @@ static int process_request(struct connection* cxn) {
 
    res = open(request->filepath, O_RDONLY | O_NONBLOCK);
    if (res  == -1 && errno == EACCES) {
+      cxn->response.keepAlive = cxn->request.keepAlive;
       internal_response(response, HTTP_DENIED);
       return INTERNAL_RESPONSE;
    }
 
    if (res == -1) {
       perror("open");
+      cxn->response.keepAlive = cxn->request.keepAlive;
       internal_response(response, HTTP_INTERNAL);
       return INTERNAL_RESPONSE;
    }
@@ -406,15 +420,10 @@ static void reset_connection(struct connection* cxn) {
    int socket = cxn->socket;
    struct env env;
 
-   debug(cxn, DEBUG_INFO, "Resetting connection\n");
+   debug(DEBUG_INFO, "Resetting connection\n");
    env = cxn->env;
    connections->erase(cxn->file);
    munmap(cxn->fileBuf, cxn->response.contentLength);
-   debug(cxn, DEBUG_INFO, "Freeing filepath\n");
-   if (cxn->request.filepath) {
-      free(cxn->request.filepath);
-   }
-   free(cxn->request.line);
    fdarr_cntl(REMOVE, cxn->file);
    close(cxn->file);
    memset(cxn, 0, sizeof(struct connection));
@@ -424,7 +433,7 @@ static void reset_connection(struct connection* cxn) {
 }
 
 static void close_connection(struct connection* cxn) {
-   debug(cxn, DEBUG_INFO, "Closing connection...\n");
+   debug(DEBUG_INFO, "Closing connection...\n");
 
    fdarr_cntl(REMOVE, cxn->socket);
    if (cxn->file) {
@@ -432,15 +441,9 @@ static void close_connection(struct connection* cxn) {
       connections->erase(cxn->file);
       close(cxn->file);
    }
-   if (cxn->request.filepath) { ///THIS IS BAD FIXFIXFIX
-      free(cxn->request.filepath);
-   }
-   if (cxn->request.line) {
-      free(cxn->request.line);
-   }
    close(cxn->socket);
    connections->erase(cxn->socket);
-   debug(cxn, DEBUG_INFO, "Freeing connection struct\n");
+   debug(DEBUG_INFO, "Freeing connection struct\n");
    free(cxn);
 }
 
@@ -454,24 +457,24 @@ static int fill_request_buffer(int socket, struct request* request) {
       perror("socket read");
       return UNRECOVERABLE;
    } else if (bytesRead == 0) {
-      debug(NULL, DEBUG_WARNING, "Zero read from socket\n");
+      debug(DEBUG_WARNING, "Zero read from socket\n");
       return ZERO_READ;
    }
 
    request->bytesUsed += bytesRead;
 
    if (request->bytesUsed >= BUF_LEN) {
-      debug(NULL, DEBUG_WARNING, "Overflowed header buffer\n");
+      debug(DEBUG_WARNING, "Overflowed header buffer\n");
       return BUFFER_OVERFLOW;
    }
 
    if (memmem(request->buffer, request->bytesUsed,
              "\r\n\r\n", strlen("\r\n\r\n")) == NULL) {
-      debug(NULL, DEBUG_INFO, "Request incomplete\n");
+      debug(DEBUG_INFO, "Request incomplete\n");
       return REQUEST_INCOMPLETE;
    }
 
-   debug(NULL, DEBUG_INFO, "End of request found\n");
+   debug(DEBUG_INFO, "End of request found\n");
 
    return 0;
 }
@@ -489,12 +492,12 @@ static int fdarr_cntl(enum CMD cmd, ...) {
    va_start(args, cmd);
    if (nfds >= fdarrMaxSize - 1 || fds == NULL) {
       fdarrMaxSize *= 2;
-      debug(NULL, DEBUG_INFO, "Expanding pollfd array from "
+      debug(DEBUG_INFO, "Expanding pollfd array from "
             "size %d to size %d\n", nfds, fdarrMaxSize);
       fds = (struct pollfd *) realloc(fds,
                                       fdarrMaxSize * sizeof(struct pollfd));
       if (fds == NULL) {
-         debug(NULL, DEBUG_WARNING, "Allocating pollfd array failed\n");
+         debug(DEBUG_WARNING, "Allocating pollfd array failed\n");
          return MALLOC_FAILED;
       }
       err = STRUCT_SIZE_CHANGE;
@@ -511,7 +514,7 @@ static int fdarr_cntl(enum CMD cmd, ...) {
       break;
    case ADD:
       fds[nfds].fd = va_arg(args, int);
-      debug(NULL, DEBUG_INFO, "Adding %dth entry(%d) to "
+      debug(DEBUG_INFO, "Adding %dth entry(%d) to "
             "pollfd array\n", nfds, fds[nfds].fd);
       fds[nfds].events = (short) va_arg(args, int);
       nfds++;
@@ -535,11 +538,11 @@ static int fdarr_cntl(enum CMD cmd, ...) {
       }
 
       if (i == nfds) {
-         debug(NULL, DEBUG_WARNING, "Entry not found in pollfd array\n");
+         debug(DEBUG_WARNING, "Entry not found in pollfd array\n");
          return STRUCT_NOT_FOUND;
       }
 
-      debug(NULL, DEBUG_INFO, "Removing %dth entry(%d) from "
+      debug(DEBUG_INFO, "Removing %dth entry(%d) from "
             "pollfd array\n", i, fd);
       if (i != nfds - 1 && nfds > 1) {
          memcpy(fds + i, fds + nfds - 1, sizeof(struct pollfd));
@@ -547,7 +550,7 @@ static int fdarr_cntl(enum CMD cmd, ...) {
       nfds--;
       break;
    case CLEAN_UP:
-      debug(NULL, DEBUG_INFO, "Freeing pollfd array\n");
+      debug(DEBUG_INFO, "Freeing pollfd array\n");
       free(fds);
       break;
    }
@@ -566,19 +569,19 @@ static int json_response(struct response* response, int code) {
 
    switch(code) {
    case JSON_IMPLEMENTED:
-      debug(NULL, DEBUG_INFO, "JSON: doing implemented.json\n");
+      debug(DEBUG_INFO, "JSON: doing implemented.json\n");
       bytesWritten = sprintf(buf, "%s", BODY_JSON_IMPLEMENTED_1);
       break;
    case JSON_ABOUT:
-      debug(NULL, DEBUG_INFO, "JSON: doing about.json\n");
+      debug(DEBUG_INFO, "JSON: doing about.json\n");
       bytesWritten = sprintf(buf, "%s", BODY_JSON_ABOUT);
       break;
    case JSON_QUIT:
-      debug(NULL, DEBUG_INFO, "JSON: doing quit\n");
+      debug(DEBUG_INFO, "JSON: doing quit\n");
       bytesWritten = sprintf(buf, "%s", BODY_JSON_QUIT);
       break;
    case JSON_STATUS:
-      debug(NULL, DEBUG_INFO, "JSON: doing status.json\n");
+      debug(DEBUG_INFO, "JSON: doing status.json\n");
       if (getrusage(RUSAGE_SELF, &usage) == -1 ||
           gettimeofday(&now, NULL) == -1) {
          return internal_response(response, HTTP_INTERNAL);
@@ -595,7 +598,7 @@ static int json_response(struct response* response, int code) {
       break;
    default:
    case JSON_FORTUNE:
-      debug(NULL, DEBUG_INFO, "JSON: doing fortune.json\n");
+      debug(DEBUG_INFO, "JSON: doing fortune.json\n");
       break;
    }
 
@@ -618,34 +621,34 @@ static int internal_response(struct response* response, int code) {
    switch(code) {
    case HTTP_DENIED:
       errors++;
-      debug(NULL, DEBUG_INFO, "Sending error 403 Denied\n");
+      debug(DEBUG_INFO, "Sending error 403 Denied\n");
       bytesWritten = sprintf(buf, "%s", BODY_403);
       break;
    case HTTP_NOTFOUND:
       errors++;
-      debug(NULL, DEBUG_INFO, "Sending error 404 Not Found\n");
+      debug(DEBUG_INFO, "Sending error 404 Not Found\n");
       bytesWritten = sprintf(buf, "%s", BODY_404);
       break;
    case HTTP_BADPARAMS:
       errors++;
-      debug(NULL, DEBUG_INFO, "Sending Bad Params message\n");
+      debug(DEBUG_INFO, "Sending Bad Params message\n");
       bytesWritten = sprintf(buf, "Bad Params!");
       code = HTTP_OK;
       break;
    case HTTP_GOODBYE:
-      debug(NULL, DEBUG_INFO, "Sending Goodbye message\n");
+      debug(DEBUG_INFO, "Sending Goodbye message\n");
       bytesWritten = sprintf(buf, "Goodbye!");
       code = HTTP_OK;
       break;
    case HTTP_CGISTATUS:
-      debug(NULL, DEBUG_INFO, "Sending CGI status message\n");
+      debug(DEBUG_INFO, "Sending CGI status message\n");
       bytesWritten = sprintf(
          buf, "%sServer Process ID: %d<BR>\nCurrent Time: %s%s",
          BODY_STATUS_BEGIN, getpid(), asctime(localtime(&t)), BODY_STATUS_END);
       code = HTTP_OK;
       break;
    case HTTP_CGI:
-      debug(NULL, DEBUG_INFO, "Sending CGI response line\n");
+      debug(DEBUG_INFO, "Sending CGI response line\n");
       bytesWritten = sprintf(response->buffer, "HTTP/1.1 200 OK\r\n");
       response->httpCode = HTTP_OK;
       response->bytesToWrite = response->bytesUsed =
@@ -654,7 +657,7 @@ static int internal_response(struct response* response, int code) {
    default:
    case HTTP_INTERNAL:
       errors++;
-      debug(NULL, DEBUG_WARNING, "Sending error 500 Internal\n");
+      debug(DEBUG_WARNING, "Sending error 500 Internal\n");
       bytesWritten = sprintf(buf, "%s", BODY_500);
       break;
    }
@@ -697,6 +700,10 @@ static int make_response_header(struct response* response) {
                          "Content-Type: %s\r\n", response->contentType);
    }
 
+   if (response->keepAlive) {
+      written += sprintf(response->buffer + written, "Connection: Keep-Alive\r\n");
+   }
+
    if (response->usingDeflate) {
       written += sprintf(response->buffer + written,
                          "Content-Encoding: deflate\r\n");
@@ -717,10 +724,10 @@ static int generate_listing(char* filepath, struct response* response) {
    char* str = (char *) calloc(1, strlen(filepath) - LEN_DOCS + 1);
    struct dirent* entry;
 
-   debug(NULL, DEBUG_INFO, "In generate_listing\n");
+   debug(DEBUG_INFO, "In generate_listing\n");
 
    if (str == NULL) {
-      debug(NULL, DEBUG_WARNING, "Allocating filepath copy failed\n");
+      debug(DEBUG_WARNING, "Allocating filepath copy failed\n");
       return MALLOC_FAILED;
    }
 
@@ -735,7 +742,7 @@ static int generate_listing(char* filepath, struct response* response) {
 
    buf = (char *) calloc(1, AVG_LISTING_LEN * numDirEntries);
    if (buf == NULL) {
-      debug(NULL, DEBUG_WARNING, "Allocating generate listing buffer failed\n");
+      debug(DEBUG_WARNING, "Allocating generate listing buffer failed\n");
       free(str);
       return MALLOC_FAILED;
    }
@@ -768,68 +775,92 @@ static int generate_listing(char* filepath, struct response* response) {
    return 0;
 }
 
-//the return value of the function indicates whether there were any errors
-//all modification is done through pointers
-static int make_request_header(struct env* env, struct request* request) {
-   char* buf = request->buffer;
-   struct stat stats;
-   //char* lineEnd, * tok, * loc;
-   char* lineEnd, * tok;
-   char* toks[MAX_TOKS], * lines[MAX_TOKS];
-   int i, numToks;
+//parse the request declaration
+//will modify the string in the request buffer via strtok!
+static int parse_request_declaration(struct request* request, char** filepath) {
+   int i;
+   char* tok;
+   char* toks[NUM_REQ_DECL_PARTS];
 
-   lineEnd = (char * ) memmem(request->buffer, request->bytesUsed, "\r\n", 2);
-   if (lineEnd == NULL) {
-      debug(NULL, DEBUG_WARNING, "Error processing request\n");
+   //separate out the request declaration into tokens
+   for (i = 0, tok = strtok(request->buffer, " \n");
+        tok;
+        i++, tok = strtok(NULL, " \n")) {
+      if (i > NUM_REQ_DECL_PARTS - 1) {
+         debug(DEBUG_WARNING, "Invalid HTTP request declaration\n");
+         return BAD_REQUEST; //should result in a 400
+      }
+      toks[i] = tok;
+   }
+
+   if (strcasestr(toks[0], "GET")) {
+      request->type = HTTP_GET;
+   } else {
+      debug(DEBUG_WARNING, "Method not supported: %s\n", toks[0]);
+      return NOT_ALLOWED; //should result in a 405
+   }
+
+   *filepath = toks[1];
+   
+   //the second part of the declaration says what HTTP version we're using
+   if (strcasestr(toks[2], "HTTP/1.1")) {
+      request->httpVersion = 1;
+   } else if (strcasestr(toks[2], "HTTP/1.0")) {
+      request->httpVersion = 0;
+   } else if (strcasestr(toks[2], "HTTP/0.9")) {
+      request->httpVersion = -1;
+   } else {
+      debug(DEBUG_WARNING, "Unsupported HTTP protocol version (!).\n");
       return BAD_REQUEST;
    }
 
-   *lineEnd = *(lineEnd + 1) = '\0';
-   debug(NULL, DEBUG_INFO, "Request: %s\n", buf);
+   return 0;
+}
 
-   request->line = (char *) calloc(1, strlen(request->buffer) + 1);
-   if (request->line == NULL) {
-      debug(NULL, DEBUG_WARNING, "Allocating request line failed\n");
-      return MALLOC_FAILED;
+//the return value of the function indicates whether there were any errors
+//all modification is done through pointers
+static int make_request_header(struct env* env, struct request* request) {
+   char* lineEnd, * tok, * tmp;
+   struct stat stats;
+   char* lines[MAX_TOKS];
+   int i, numToks, res;
+
+   //find the end of the first line of the request
+   if ((lineEnd = (char * )
+        memmem(request->buffer, request->bytesUsed, "\r\n", 2)) == NULL) {
+      debug(DEBUG_WARNING, "Can't find HTTP request declaration\n");
+      return BAD_REQUEST; //should result in a 400
+   }
+   *lineEnd = *(lineEnd + 1) = '\0';
+
+   if ((res = parse_request_declaration(request, &tmp))) {
+      return res;
    }
 
-   strcpy(request->line, request->buffer);
-
-   for (i = 0, tok = strtok(buf + strlen(buf) + 2, "\r\n");
+   //split the remainder of the request up
+   for (i = 0, tok = strtok(lineEnd + 2, "\r\n");
        tok;
        i++, tok = strtok(NULL, "\r\n")) {
       if (i >= MAX_TOKS) {
-         debug(NULL, DEBUG_WARNING, "Overflowed header lines buffer\n");
-         return BUFFER_OVERFLOW;
+         debug(DEBUG_WARNING, "Overflowed header lines buffer\n");
+         return BUFFER_OVERFLOW; //should result in a 500
       }
       lines[i] = tok;
    }
    numToks = i;
 
-   for (i = 0, tok = strtok(buf, " \n"); tok; i++, tok = strtok(NULL, " \n")) {
-      if (i >= MAX_TOKS) {
-         debug(NULL, DEBUG_WARNING, "Overflowed header lines buffer\n");
-         return BUFFER_OVERFLOW;
-      }
-      toks[i] = tok;
-   }
-
    //we really need to change the way we determine keep-alive
    //http/1.1 specifies persistent unless specifically stated otherwise
    for (i = 0; i < numToks; i++) {
       if (strcasecmp(lines[i], "Connection: keep-alive") == 0) {
-         debug(NULL, DEBUG_INFO, "* HTTP Option: %s\n", lines[i]);
          request->keepAlive = true;
       } else if (strcasestr(lines[i], "Accept-Encoding:")) {
          if (strcasestr(lines[i] + strlen("Accept-Encoding:"), "deflate")) {
-            debug(NULL, DEBUG_INFO, "* HTTP Option: %s\n", lines[i]);
             request->acceptDeflate = true;
          }
       } else if (strcasestr(lines[i], "Referer:")) {
-         debug(NULL, DEBUG_INFO, "* HTTP Option: %s\n", lines[i]);
          request->referer = lines[i] + strlen("Referer: ");
       } else if (strcasestr(lines[i], "User-Agent:")) {
-         debug(NULL, DEBUG_INFO, "* HTTP Option: %s\n", lines[i]);
          request->userAgent = lines[i] + strlen("User Agent: ");
       }
    }
@@ -842,41 +873,26 @@ static int make_request_header(struct env* env, struct request* request) {
       request->userAgent = "";
    }
 
-   url_decode(toks[1]);
+   url_decode(tmp);
 
-   if (strcmp(toks[0], "GET")) {
-      debug(NULL, DEBUG_WARNING, "Server does not support operation\n");
-      return HTTP_NOTFOUND; //this is what he does...no idea why
-   }
-
-   if ((strstr(toks[1], "/cgi-bin/"))) { //check for cgi
-      debug(NULL, DEBUG_INFO, "cgi request: %s\n", toks[1]);
-      env->method = toks[0];
-      env->query = toks[1];
+   if ((strstr(tmp, "/cgi-bin/"))) { //check for cgi
+      debug(DEBUG_INFO, "cgi request: %s\n", tmp);
+      env->method = "GET"; //FIX THIS SOME TIME IN THE FUTURE...
+      env->query = tmp;
       return cgi_request(env);
    }
 
-   if (strstr(toks[1], "/json/")) { //check for json
-      debug(NULL, DEBUG_INFO, "json request: %s\n", toks[1]);
-      env->method = toks[0];
-      env->query = toks[1];
+   if (strstr(tmp, "/json/")) { //check for json
+      debug(DEBUG_INFO, "json request: %s\n", tmp);
+      env->query = request->filepath;
       return json_request(env);
    }
 
-   //one extra char is for the null btye
-   //the other is for the possible '/' we might have to add
-   request->filepath = (char *) calloc(1, strlen(toks[1]) +
-                                       LEN_DOCS + LEN_INDEX_HTML + 2);
-   if (request->filepath == NULL) {
-      debug(NULL, DEBUG_WARNING, "Allocating filepath failed\n");
-      return MALLOC_FAILED;
-   }
-
    strcpy(request->filepath, "docs");
-   strcpy(request->filepath + strlen("docs"), toks[1]);
+   strcpy(request->filepath + strlen("docs"), tmp);
 
    if (stat(request->filepath, &stats)) {
-      debug(NULL, DEBUG_INFO, "File not found... generating 404\n");
+      debug(DEBUG_INFO, "File not found... generating 404\n");
       return HTTP_NOTFOUND; //this is a genuine 404
    }
 
@@ -888,16 +904,43 @@ static int make_request_header(struct env* env, struct request* request) {
 
       //maybe change this to an access() call
       if (stat(request->filepath, &stats)) {
-         debug(NULL, DEBUG_INFO, "Generating directory listing\n");
+         debug(DEBUG_INFO, "Generating directory listing\n");
          //this is where we generate the listing
          return HTTP_GENLIST;
       }
    }
 
    request->contentLength = stats.st_size;
-   debug(NULL, DEBUG_INFO, "File{size: %d, "
-         "path: %s}\n", stats.st_size, request->filepath);
    return 0;
+}
+
+static inline const char* bool_to_string(bool b) {
+   return b ? "true" : "false";
+}
+
+static char* request_declaration_to_string(const struct request* request) {
+   static char str[NAME_BUF_LEN];
+   static char* type2String[NUM_HTTP_REQUEST_TYPES] = {
+      "GET", "PUT", "POST", "DELETE"
+   };
+
+   snprintf(str, NAME_BUF_LEN, "%s %s HTTP/%.1lf",
+            type2String[request->type],
+            request->filepath,
+            request->httpVersion / 10.0 + 1.0);
+   return str;
+}
+
+//make this into a to_string method some time in the future
+static void print_request(struct request* request) {
+   debug(DEBUG_INFO, "Request: %s\n", request_declaration_to_string(request));
+   debug(DEBUG_INFO, "|-HTTP content length: %d bytes\n", request->contentLength);
+   debug(DEBUG_INFO, "|-HTTP-Option Referrer: %s\n", request->referer);
+   debug(DEBUG_INFO, "|-HTTP-Option User-Agent: %s\n", request->userAgent);
+   debug(DEBUG_INFO, "|-HTTP-Option Keep-Alive?: %s\n",
+         bool_to_string(request->keepAlive));
+   debug(DEBUG_INFO, "|-HTTP-Option Accept-Encoding: deflate?: %s\n",
+         bool_to_string(request->keepAlive));
 }
 
 //quick and dirty url decoding function. improve later.
@@ -936,18 +979,15 @@ static void log_access(struct connection* cxn) {
    char timeBuf[NAME_BUF_LEN], v6buf[INET6_ADDRSTRLEN];
    time_t t = time(NULL);
 
-   if (strftime(timeBuf, NAME_BUF_LEN, "%d/%b/%Y:%X %z", localtime(&t)) == 0) {
-      debug(NULL, DEBUG_WARNING, "Error formatting log string\n");
-   }
-
+   strftime(timeBuf, NAME_BUF_LEN, "%d/%b/%Y:%X %z", localtime(&t));
    if (getsockname(cxn->socket, (struct sockaddr *) &me, &sockSize)) {
-      debug(NULL, DEBUG_WARNING, "Error getting sock name\n");
+      debug(DEBUG_WARNING, "Error getting sock name\n");
    }
 
    fprintf(accessLog, "%s - - [%s] \"%s\" %d %u \"%s\" \"%s\"\n",
            inet_ntop(AF_INET6, &me.sin6_addr, v6buf, INET6_ADDRSTRLEN),
            timeBuf,
-           cxn->request.line,
+           request_declaration_to_string(&cxn->request),
            cxn->response.httpCode,
            cxn->response.contentLength,
            cxn->request.referer,
@@ -974,7 +1014,7 @@ static int json_request(struct env* env) {
       return JSON_FORTUNE;
    }
 
-   debug(NULL, DEBUG_WARNING, "Unsupported JSON operation requested");
+   debug(DEBUG_WARNING, "Unsupported JSON operation requested");
    //return DO_JSON;
    return HTTP_NOTFOUND;
 }
@@ -995,7 +1035,7 @@ static int cgi_request(struct env* env) {
    }
 
    if (strcmp(env->query + LEN_CGI_BIN, "status") == 0) {
-      debug(NULL, DEBUG_INFO, "cgi status requested\n");
+      debug(DEBUG_INFO, "cgi status requested\n");
       return HTTP_CGISTATUS;
    }
 
@@ -1011,14 +1051,14 @@ static int cgi_request(struct env* env) {
 
    env->filepath = (char *) calloc(1, len + LEN_CGI + 1);
    if (env->filepath == NULL) {
-      debug(NULL, DEBUG_WARNING, "Failed to allocate cgi filepath\n");
+      debug(DEBUG_WARNING, "Failed to allocate cgi filepath\n");
       return MALLOC_FAILED;
    }
 
    memcpy(env->filepath + LEN_CGI, env->query + LEN_CGI_BIN, len);
    (env->filepath + LEN_CGI)[len] = '\0';
    memcpy(env->filepath, "cgi/", LEN_CGI);
-   debug(NULL, DEBUG_INFO, "cgi filepath: %s\n", env->filepath);
+   debug(DEBUG_INFO, "cgi filepath: %s\n", env->filepath);
 
    if (access(env->filepath, X_OK)) {
       free(env->filepath);
@@ -1031,14 +1071,14 @@ static int cgi_request(struct env* env) {
 
    if (getsockname(env->serverSocket, (struct sockaddr *) &server, &sockSize) ||
       getsockname(env->mySocket, (struct sockaddr *) &me, &sockSize)) {
-      debug(NULL, DEBUG_WARNING, "Error getting server socket name\n");
+      debug(DEBUG_WARNING, "Error getting server socket name\n");
       free(env->filepath);
       return HTTP_INTERNAL;
    }
 
    envvarSpace = (char *) calloc(NUM_ENV_VARS, ENV_BUF_LEN);
    if (envvarSpace == NULL) {
-      debug(NULL, DEBUG_WARNING, "Allocating envvar space failed\n");
+      debug(DEBUG_WARNING, "Allocating envvar space failed\n");
       free(env->filepath);
       return MALLOC_FAILED;
    }
@@ -1073,10 +1113,10 @@ static int cgi_request(struct env* env) {
 }
 
 static int do_cgi(struct env* env) {
-   debug(NULL, DEBUG_INFO, "CGI operation in progress\n");
+   debug(DEBUG_INFO, "CGI operation in progress\n");
 
    if ((env->childPid = fork()) == -1) {
-      debug(NULL, DEBUG_WARNING, "fork failed\n");
+      debug(DEBUG_WARNING, "fork failed\n");
       free(env->filepath);
       return HTTP_INTERNAL;
    } else if (env->childPid == 0) { //the child
@@ -1084,7 +1124,7 @@ static int do_cgi(struct env* env) {
       dup2(env->mySocket, 1);
 
       execle(env->filepath, env->filepath, NULL, env->envvars);
-      debug(NULL, DEBUG_WARNING, "Exec: %s\n", strerror(errno));
+      debug(DEBUG_WARNING, "Exec: %s\n", strerror(errno));
       exit(EXIT_FAILURE);
    }
 
@@ -1095,40 +1135,17 @@ static int do_cgi(struct env* env) {
 }
 
 static inline void set_debug_level(uintptr_t debugLevel) {
-   debug(NULL, DEBUG_SET, (char *) debugLevel);
+   debug(DEBUG_SET, (char *) debugLevel);
 }
 
-static void preamble(struct sockaddr_in6* info, uint32_t debug) {
-   static int nameLength = 0;
-   char timeBuf[NAME_BUF_LEN], name[NAME_BUF_LEN], v6buf[INET6_ADDRSTRLEN];
-   time_t t = time(NULL);
-
-   if (info) {
-      snprintf(name, NAME_BUF_LEN, "%s/%d",
-               inet_ntop(AF_INET6, &info->sin6_addr, v6buf, INET6_ADDRSTRLEN),
-               htons(info->sin6_port));
-   } else {
-      sprintf(name, "Unknown");
-   }
-
-   if ((int) strlen(name)  > nameLength) {
-      nameLength = strlen(name);
-   }
-
-   strftime(timeBuf, NAME_BUF_LEN, "%T", localtime(&t));
-   fprintf(stderr, "[ %s: %-*s ] - ", timeBuf, nameLength, name);
-   switch(debug) {
-   case(DEBUG_ERROR): fprintf(stderr, "ERROR "); break;
-   case(DEBUG_WARNING): fprintf(stderr, "WARNING "); break;
-   case(DEBUG_INFO): fprintf(stderr, "INFO "); break;
-   default: fprintf(stderr, "**unknown debug level** "); break;
-   }
-}
-
-static void debug(struct connection* cxn, uint32_t debug, const char* msg, ...) {
+static void debug(uint32_t debug, const char* msg, ...) {
+   static const char* level2String[NUM_DEBUG_LEVELS] = {
+      "ERROR", "WARNING", "INFO"
+   };
    static uintptr_t debugLevel = DEBUG_INFO;
-   struct sockaddr_in6 me;
-   socklen_t sockSize = sizeof(struct sockaddr_in6);
+   static char timeBuf[NAME_BUF_LEN];
+   
+   time_t t = time(NULL);
    va_list args;
 
    if (debug == DEBUG_SET) {
@@ -1136,14 +1153,9 @@ static void debug(struct connection* cxn, uint32_t debug, const char* msg, ...) 
       return;
    }
 
-   if (cxn) {
-      if (getsockname(cxn->socket, (struct sockaddr *) &me, &sockSize)) {
-         cxn = NULL;
-      }
-   }
-
    if (debug <= debugLevel) {
-      preamble(cxn ? &me : NULL, debug);
+      strftime(timeBuf, NAME_BUF_LEN, "[%d/%b/%Y:%X %z] - ", localtime(&t));
+      fprintf(stderr, "%s %s ", timeBuf, level2String[debug]);
       va_start(args, msg);
       vfprintf(stderr, msg, args);
       va_end(args);
@@ -1159,15 +1171,13 @@ static void clean_exit(int unused) {
    for (itr = connections->begin(); itr != connections->end(); itr++) {
       struct connection* cxn = itr->second;
       if (cxn) {
-         free(cxn->request.filepath);
-         free(cxn->request.line);
          if (connections->count(cxn->file)) {
             connections->at(cxn->file) = NULL;
             munmap(cxn->fileBuf, cxn->response.contentLength);
             close(cxn->file);
          }
          close(cxn->socket);
-         debug(cxn, DEBUG_INFO, "Freeing connections struct\n");
+         debug(DEBUG_INFO, "Freeing connections struct\n");
          free(cxn);
       }
    }
@@ -1180,11 +1190,11 @@ static void clean_exit(int unused) {
 static void wait_cgi(int unused) {
    int childStatus;
 
-   debug(NULL, DEBUG_INFO, "Child signal received\n");
+   debug(DEBUG_INFO, "Child signal received\n");
 
    if (waitpid(0, &childStatus, WNOHANG)) {
       if (WIFEXITED(childStatus)) {
-         debug(NULL, DEBUG_INFO, "Child exits\n");
+         debug(DEBUG_INFO, "Child exits\n");
       }
    }
 }
@@ -1202,6 +1212,6 @@ static void add_handler(int signal, void (*handlerFunc)(int)) {
 }
 
 static inline void pexit(const char* str) {
-   perror(str);
+   debug(DEBUG_ERROR, "POSIX %s: %s\n", str, strerror(errno));
    exit(EXIT_FAILURE);
 }
