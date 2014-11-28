@@ -443,11 +443,10 @@ static void close_connection(struct connection* cxn) {
       fdarr_cntl(REMOVE, cxn->file);
       connections->erase(cxn->file);
       close(cxn->file);
-      free(cxn->request.filepath); //moved this here from ** below
    }
-   //if (cxn->request.filepath) { ///THIS IS BAD FIXFIXFIX
-   //free(cxn->request.filepath); //**
-      //}
+   if (cxn->request.filepath) { ///THIS IS BAD FIXFIXFIX
+      free(cxn->request.filepath);
+   }
    close(cxn->socket);
    connections->erase(cxn->socket);
    debug(DEBUG_INFO, "Freeing connection struct\n");
@@ -846,8 +845,6 @@ static int make_request_header(struct env* env, struct request* request) {
 
    //save a pointer to where the filepath is
    tmp = request->filepath;
-   
-   // debug(DEBUG_INFO, "Request: %s\n", buf);
 
    //split the remainder of the request up
    for (i = 0, tok = strtok(lineEnd + 2, "\r\n");
