@@ -200,73 +200,80 @@ static int process_mysock_events(int socket, short revents) {
    return err;
 }
 
+static int request_state_zero_read(struct connection* cxn) {
+   debug(DEBUG_INFO, "Zero read, closing connection\n");
+   close_connection(cxn);
+   return FDARR_MODIFIED;
+}
+
+static int request_state_error(struct connection* cxn) {
+   debug(DEBUG_WARNING, "Error processing request...sending 500!\n");
+   cxn->state = ST_INTERNAL;
+   internal_response(&cxn->response, HTTP_INTERNAL);
+   return 0;
+}
+
+static int request_state_incomplete(struct connection* cxn) {
+   // do nothing!
+   return 0;
+}
+
+static int request_state_finished(struct connection* cxn) {
+   int res, err = 0;
+   char* ptr;
+
+   numRequests++;
+   res = process_request(cxn);
+
+   if (res == HTTP_CGI) {
+      cxn->cgi = true;
+      cxn->state = ST_INTERNAL;
+   } else if (res == CGI_QUIT) {
+      cxn->quit = true;
+      cxn->state = ST_INTERNAL;
+   } else if (res == INTERNAL_RESPONSE) {
+      cxn->state = ST_INTERNAL;
+   } else {
+      cxn->fileBuf = (char *) mmap(NULL, cxn->response.contentLength,
+                                   PROT_READ, MAP_PRIVATE, cxn->file, 0);
+      if ((intptr_t) cxn->fileBuf == -1) {
+         cxn->state = ST_INTERNAL;
+         perror("mmap");
+         close(cxn->file);
+         internal_response(&cxn->response, HTTP_INTERNAL);
+      } else {
+         cxn->state = ST_RESPONSE_HEA;
+         fdarr_cntl(FDARR_ADD, cxn->file, POLLIN);
+         err = FDARR_MODIFIED;
+         connections->insert(std::make_pair(cxn->file, cxn));
+         debug(DEBUG_INFO, "Adding fd to struct, #%d\n", cxn->file);
+         ptr = strchr(cxn->request.filepath, '.');
+         if (ext2mime->count(std::string(ptr + 1))) {
+            cxn->response.contentType =
+               ext2mime->at(std::string(ptr +1)).c_str();
+         }
+
+         make_response_header(&cxn->response);
+      }
+   }
+   return err;
+}
+
 static int process_cxsock_events(struct connection* cxn, short revents) {
+   static int (*frbActions[NUM_REQUEST_STATES])(struct connection *) = {
+      request_state_zero_read,
+      request_state_error,
+      request_state_incomplete,
+      request_state_finished
+   };
    int res, err = 0;
    char* ptr;
 
    if (revents & POLLIN && cxn->state == ST_REQUEST_INP) {
       debug(DEBUG_INFO, "cxsock, revent: POLLIN, state: ST_REQUEST_INP\n");
-
-      // new idea... we coule have fill_request_buffer change the state
-      // or even more in general, functions that we call could return
-      // the next state we should go into...
-      // ??? but what about errors then???
-      // at the top level ignore them ??
-      // or go directly into internal server error or drop the connection?
-
-      switch(res = fill_request_buffer(cxn->socket, &cxn->request)) {
-      default:
-      case UNRECOVERABLE:
-      case ZERO_READ:
-         debug(DEBUG_INFO, "Zero read, closing connection\n");
-         close_connection(cxn);
-         err = FDARR_MODIFIED;
-         break;
-      case BUFFER_OVERFLOW:
-         //fix this for real-world later
-         cxn->state = ST_INTERNAL;
-         debug(DEBUG_WARNING, "Overflowed request header buffer\n");
-         internal_response(&cxn->response, HTTP_INTERNAL);
-         break;
-      case REQUEST_INCOMPLETE:
-         break;
-      case REQUEST_FINISHED:
-         numRequests++;
-         res = process_request(cxn);
-
-         if (res == HTTP_CGI) {
-            cxn->cgi = true;
-            cxn->state = ST_INTERNAL;
-         } else if (res == CGI_QUIT) {
-            cxn->quit = true;
-            cxn->state = ST_INTERNAL;
-         } else if (res == INTERNAL_RESPONSE) {
-            cxn->state = ST_INTERNAL;
-         } else {
-            cxn->fileBuf = (char *) mmap(NULL, cxn->response.contentLength,
-                                         PROT_READ, MAP_PRIVATE, cxn->file, 0);
-            if ((intptr_t) cxn->fileBuf == -1) {
-               cxn->state = ST_INTERNAL;
-               perror("mmap");
-               close(cxn->file);
-               internal_response(&cxn->response, HTTP_INTERNAL);
-            } else {
-               cxn->state = ST_RESPONSE_HEA;
-               fdarr_cntl(FDARR_ADD, cxn->file, POLLIN);
-               err = FDARR_MODIFIED;
-               connections->insert(std::make_pair(cxn->file, cxn));
-               debug(DEBUG_INFO, "Adding fd to struct, #%d\n", cxn->file);
-               ptr = strchr(cxn->request.filepath, '.');
-               if (ext2mime->count(std::string(ptr + 1))) {
-                  cxn->response.contentType =
-                     ext2mime->at(std::string(ptr +1)).c_str();
-               }
-
-               make_response_header(&cxn->response);
-            }
-         }
-         break;
-      }
+      return frbActions[fill_request_buffer(cxn->socket,
+                                            cxn->request.buffer,
+                                            &cxn->request.bytesUsed)](cxn);
    } else if (revents & POLLOUT && cxn->state == ST_INTERNAL) {
       debug(DEBUG_INFO, "cxsock, revent: POLLOUT, state: ST_RESPONSE_HEA\n");
 
@@ -446,35 +453,31 @@ static void close_connection(struct connection* cxn) {
    free(cxn);
 }
 
-static int fill_request_buffer(int socket, struct request* request) {
+static enum REQUEST_STATE fill_request_buffer(int socket, char* buffer, unsigned int* bytesUsed) {
    int bytesRead = 0;
 
-   if ((bytesRead = read(socket,
-                        request->buffer + request->bytesUsed,
-                        BUF_LEN - request->bytesUsed)) == -1) {
-      perror("socket read");
-      return UNRECOVERABLE;
+   if ((bytesRead = read(socket, buffer + *bytesUsed, BUF_LEN - *bytesUsed)) == -1) {
+      debug(DEBUG_WARNING, "read: %s\n", strerror(errno));
+      return ST_ERROR;
    } else if (bytesRead == 0) {
       debug(DEBUG_WARNING, "Zero read from socket\n");
-      return ZERO_READ;
+      return ST_ZERO_READ;
    }
 
-   request->bytesUsed += bytesRead;
+   *bytesUsed += bytesRead;
 
-   if (request->bytesUsed >= BUF_LEN) {
-      debug(DEBUG_WARNING, "Overflowed header buffer\n");
-      return BUFFER_OVERFLOW;
+   if (*bytesUsed >= BUF_LEN) {
+      debug(DEBUG_WARNING, "Request buffer full.\n");
+      return ST_ERROR;
    }
 
-   if (memmem(request->buffer, request->bytesUsed,
-             "\r\n\r\n", strlen("\r\n\r\n")) == NULL) {
-      debug(DEBUG_INFO, "Request incomplete\n");
-      return REQUEST_INCOMPLETE;
+   if (memmem(buffer, *bytesUsed, "\r\n\r\n", strlen("\r\n\r\n")) == NULL) {
+      debug(DEBUG_INFO, "Request incomplete.\n");
+      return ST_INCOMPLETE;
+   } else {
+      debug(DEBUG_INFO, "End of request found\n");
+      return ST_FINISHED;
    }
-
-   debug(DEBUG_INFO, "End of request found\n");
-
-   return REQUEST_FINISHED;
 }
 
 static int fdarr_cntl(enum FDARR_CMD cmd, ...) {
@@ -865,7 +868,9 @@ static int make_request_header(struct env* env, struct request* request) {
          request->userAgent = lines[i] + strlen("User Agent: ");
       }
    }
-
+   
+   //so imo this is where we should end make_request_header, actually...
+   
    url_decode(tmp);
 
    if ((strstr(tmp, "/cgi-bin/"))) { //check for cgi

@@ -3,8 +3,6 @@
 
 
 ///debug levels///
-#define DEBUG_SET 0xAAAAAAAA
-
 #define DEBUG_NONE 0            //no debugging. Error messages will still be displayed.
 #define DEBUG_ERROR 0           //only display error messages.
 #define DEBUG_WARNING 1         //display warning messages as well
@@ -16,17 +14,13 @@
 #define STRUCT_SIZE_CHANGE     -2
 #define STRUCT_NOT_FOUND       -3
 #define NOT_ALLOWED            -4
-#define REQUEST_INCOMPLETE     -5
-#define REQUEST_FINISHED       -6
-#define BUFFER_OVERFLOW        -7
-#define ZERO_READ              -8
-#define FDARR_MODIFIED         -9
-#define UNRECOVERABLE          -10
-#define CGI_QUIT               -11
-#define BAD_SOCKET             -12
-#define MALLOC_FAILED          -13
-#define INTERNAL_RESPONSE      -14
-#define BAD_REQUEST            -15
+#define BUFFER_OVERFLOW        -5
+#define FDARR_MODIFIED         -6
+#define CGI_QUIT               -7
+#define BAD_SOCKET             -8
+#define MALLOC_FAILED          -9
+#define INTERNAL_RESPONSE      -10
+#define BAD_REQUEST            -11
 
 
 ///limitations///
@@ -38,10 +32,12 @@
 #define NUM_ENV_VARS 8
 #define NUM_DEBUG_LEVELS 3
 #define NUM_HTTP_REQUEST_TYPES 4
+#define NUM_REQUEST_STATES 4
 #define NUM_REQ_DECL_PARTS 3
 
 
 ///all other defines///
+#define DEBUG_SET 0xAAAAAAAA
 #define USEC_PER_SEC 100000.0
 #define MAX_HTTP_CODE 600
 #define HTTP_OK 200
@@ -111,6 +107,13 @@ enum CXN_STATE {
    ST_RESPONSE_FIN
 };
 
+enum REQUEST_STATE {
+   ST_ZERO_READ,
+   ST_ERROR,
+   ST_INCOMPLETE,
+   ST_FINISHED
+};
+
 enum REQUEST_TYPE {
    REQUEST_GET,
    REQUEST_PUT,
@@ -129,8 +132,9 @@ enum RESPONSE_TYPE {
 
 struct request {
    char buffer[BUF_LEN];
+   enum REQUEST_STATE state;
    enum REQUEST_TYPE type;      //this and the two below come from the request declaration
-   int httpVersion;             //-1 for HTTP/0.9, 0 for HTTP/1.0, 1 for HTTP/1.1
+   int httpVersion;             //-1 for HTTP/0.9, 0 for HTTP/1.0, 1 for HTTP/1.1xo
    char filepath[NAME_BUF_LEN]; //we have our own buffer for this so we don't mess up the main buffer
    unsigned int bytesUsed;
    unsigned int contentLength;
@@ -142,7 +146,7 @@ struct request {
 
 struct response {
    char buffer[BUF_LEN];
-   //enum RESPONSE_TYPE type;
+   enum RESPONSE_TYPE type;
    unsigned int bytesUsed;
    unsigned int contentLength;
    unsigned int headerLength;
@@ -179,7 +183,6 @@ struct connection {
 ///function prototypes///
 static int make_response_header(struct response* response);
 static int make_request_header(struct env* env, struct request* request);
-static int fill_request_buffer(int socket, struct request* request);
 static int internal_response(struct response* response, int code);
 static int json_response(struct response* response, int code);
 static int generate_listing(char* filepath, struct response* response);
@@ -202,9 +205,16 @@ static void log_access(struct connection* cxn);
 static void url_decode(char* url);
 static void debug(uint32_t debug, const char* msg, ...);
 static char* request_declaration_to_string(const struct request* request); //fix the name on this
+static enum REQUEST_STATE fill_request_buffer(int socket, char* buffer, unsigned int* bytesUsed);
 static inline const char* bool_to_string(bool b);
 static inline void set_debug_level(uintptr_t debugLevel);
 static inline void pexit(const char* str);
+
+///request state prototypes///
+static int request_state_zero_read(struct connection* cxn);
+static int request_state_error(struct connection* cxn);
+static int request_state_incomplete(struct connection* cxn);
+static int request_state_finished(struct connection* cxn);
 
 
 ///c++ typedefs///
