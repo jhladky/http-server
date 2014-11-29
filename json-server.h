@@ -1,5 +1,5 @@
-#ifndef __HTTP_SERVER_H
-#define __HTTP_SERVER_H
+#ifndef _HTTP_SERVER_H_
+#define _HTTP_SERVER_H_
 
 
 ///debug levels///
@@ -93,22 +93,49 @@
 #define BODY_JSON_STATUS "{\n\"num_clients\": %d, \"num_requests\": %d, \"errors\": %d, \"uptime\": %lf, \"cpu_time\": %lf, \"memory_used\": %ld\n}"
 
 ///structs, unions, and enums///
-enum CMD {GET, ADD, MODIFY, REMOVE, CLEAN_UP};
+enum FDARR_CMD {
+   FDARR_GET,
+   FDARR_ADD,
+   FDARR_MODIFY,
+   FDARR_REMOVE,
+   FDARR_CLEAN_UP
+};
 
-enum STATE {REQUEST_INP, LOAD_FILE, INTERNAL, RESPONSE_HEA, RESPONSE_FIL, CGI_FIL, RESPONSE_FIN};
+enum CXN_STATE {
+   ST_REQUEST_INP,
+   ST_LOAD_FILE,
+   ST_INTERNAL,
+   ST_RESPONSE_HEA,
+   ST_RESPONSE_FIL,
+   ST_CGI_FIL,
+   ST_RESPONSE_FIN
+};
 
-enum REQUEST_TYPE {HTTP_GET, HTTP_PUT, HTTP_POST, HTTP_DELETE};
-//enum RESPONSE_TYPE {OK, BAD_REQUEST, METHOD_NOT_ALLOWED, FORBIDDEN, NOT_FOUND, INTERNAL_ERROR}
+enum REQUEST_TYPE {
+   REQUEST_GET,
+   REQUEST_PUT,
+   REQUEST_POST,
+   REQUEST_DELETE
+};
+
+enum RESPONSE_TYPE {
+   RESPONSE_OK,
+   RESPONSE_BAD_REQUEST,
+   RESPONSE_METHOD_NOT_ALLOWED,
+   RESPONSE_FORBIDDEN,
+   RESPONSE_NOT_FOUND,
+   RESPONSE_INTERNAL_ERROR
+};
 
 struct request {
    char buffer[BUF_LEN];
    enum REQUEST_TYPE type;      //this and the two below come from the request declaration
    int httpVersion;             //-1 for HTTP/0.9, 0 for HTTP/1.0, 1 for HTTP/1.1
-   char filepath[NAME_BUF_LEN];
+   char filepath[NAME_BUF_LEN]; //we have our own buffer for this so we don't mess up the main buffer
    unsigned int bytesUsed;
    unsigned int contentLength;
-   const char* referer;         //we malloc line but we don't have to...
-   const char* userAgent;       //...malloc these so they're const
+   const char* referer;         //these point to locations in buffer
+   const char* userAgent;
    bool keepAlive;
    bool acceptDeflate;
 } request;
@@ -137,7 +164,7 @@ struct env {
 } env;
 
 struct connection {
-   enum STATE state;         //the current state of the connection
+   enum CXN_STATE state;     //the current state of the connection
    int socket;               //fd of our socket
    int file;                 //fd of our file
    char* fileBuf;            //location of the file from mmap, maybe use sendfile... ?
@@ -158,7 +185,7 @@ static int json_response(struct response* response, int code);
 static int generate_listing(char* filepath, struct response* response);
 static int cgi_request(struct env* env);
 static int json_request(struct env* env);
-static int fdarr_cntl(enum CMD cmd, ...);
+static int fdarr_cntl(enum FDARR_CMD cmd, ...);
 static int do_cgi(struct env* env);
 static int process_request(struct connection* cxn);
 static int process_mysock_events(int socket, short revents);

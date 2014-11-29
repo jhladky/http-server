@@ -106,7 +106,7 @@ int main(int argc, char* argv[]) {
       pexit("listen");
    }
 
-   if (fdarr_cntl(ADD, mySock, POLLIN) == MALLOC_FAILED) {
+   if (fdarr_cntl(FDARR_ADD, mySock, POLLIN) == MALLOC_FAILED) {
       debug(DEBUG_ERROR, "malloc failed\n");
       exit(EXIT_FAILURE);
    }
@@ -118,7 +118,7 @@ int main(int argc, char* argv[]) {
       unsigned int i;
       int res, fd;
 
-      fdarr_cntl(GET, &fds, &nfds);
+      fdarr_cntl(FDARR_GET, &fds, &nfds);
       if ((res = poll(fds, nfds, -1)) == -1) {
          debug(DEBUG_WARNING, "Poll: %s\n", strerror(errno));
          continue; //not a fan of this
@@ -183,7 +183,7 @@ static int process_mysock_events(int socket, short revents) {
          return BAD_SOCKET; //(2)
       }
 
-      cxn->state = REQUEST_INP;
+      cxn->state = ST_REQUEST_INP;
       cxn->response.httpCode = HTTP_OK;
       cxn->env.mySocket = cxn->socket;
       cxn->env.serverSocket = socket;
@@ -191,7 +191,7 @@ static int process_mysock_events(int socket, short revents) {
             inet_ntop(AF_INET6, &me.sin6_addr, v6buf, INET6_ADDRSTRLEN));
       numClients++;
 
-      fdarr_cntl(ADD, cxn->socket, POLLIN | POLLOUT);
+      fdarr_cntl(FDARR_ADD, cxn->socket, POLLIN | POLLOUT);
       err = FDARR_MODIFIED;
       connections->insert(std::make_pair(cxn->socket, cxn));
       debug(DEBUG_INFO, "Allocated connection struct(%d)\n", cxn->socket);
@@ -204,10 +204,19 @@ static int process_cxsock_events(struct connection* cxn, short revents) {
    int res, err = 0;
    char* ptr;
 
-   if (revents & POLLIN && cxn->state == REQUEST_INP) {
-      debug(DEBUG_INFO, "cxsock, revent: POLLIN, state: REQUEST_INP\n");
+   if (revents & POLLIN && cxn->state == ST_REQUEST_INP) {
+      debug(DEBUG_INFO, "cxsock, revent: POLLIN, state: ST_REQUEST_INP\n");
+
+      // new idea... we coule have fill_request_buffer change the state
+      // or even more in general, functions that we call could return
+      // the next state we should go into...
+      // ??? but what about errors then???
+      // at the top level ignore them ??
+      // or go directly into internal server error or drop the connection?
 
       switch(res = fill_request_buffer(cxn->socket, &cxn->request)) {
+      default:
+      case UNRECOVERABLE:
       case ZERO_READ:
          debug(DEBUG_INFO, "Zero read, closing connection\n");
          close_connection(cxn);
@@ -215,35 +224,35 @@ static int process_cxsock_events(struct connection* cxn, short revents) {
          break;
       case BUFFER_OVERFLOW:
          //fix this for real-world later
-         cxn->state = INTERNAL;
+         cxn->state = ST_INTERNAL;
          debug(DEBUG_WARNING, "Overflowed request header buffer\n");
-         cxn->response.keepAlive = cxn->request.keepAlive;
          internal_response(&cxn->response, HTTP_INTERNAL);
          break;
-      case 0:
+      case REQUEST_INCOMPLETE:
+         break;
+      case REQUEST_FINISHED:
          numRequests++;
          res = process_request(cxn);
 
          if (res == HTTP_CGI) {
             cxn->cgi = true;
-            cxn->state = INTERNAL;
+            cxn->state = ST_INTERNAL;
          } else if (res == CGI_QUIT) {
             cxn->quit = true;
-            cxn->state = INTERNAL;
+            cxn->state = ST_INTERNAL;
          } else if (res == INTERNAL_RESPONSE) {
-            cxn->state = INTERNAL;
+            cxn->state = ST_INTERNAL;
          } else {
             cxn->fileBuf = (char *) mmap(NULL, cxn->response.contentLength,
                                          PROT_READ, MAP_PRIVATE, cxn->file, 0);
             if ((intptr_t) cxn->fileBuf == -1) {
-               cxn->state = INTERNAL;
+               cxn->state = ST_INTERNAL;
                perror("mmap");
                close(cxn->file);
-               cxn->response.keepAlive = cxn->request.keepAlive;
                internal_response(&cxn->response, HTTP_INTERNAL);
             } else {
-               cxn->state = RESPONSE_HEA;
-               fdarr_cntl(ADD, cxn->file, POLLIN);
+               cxn->state = ST_RESPONSE_HEA;
+               fdarr_cntl(FDARR_ADD, cxn->file, POLLIN);
                err = FDARR_MODIFIED;
                connections->insert(std::make_pair(cxn->file, cxn));
                debug(DEBUG_INFO, "Adding fd to struct, #%d\n", cxn->file);
@@ -253,30 +262,27 @@ static int process_cxsock_events(struct connection* cxn, short revents) {
                      ext2mime->at(std::string(ptr +1)).c_str();
                }
 
-               cxn->response.keepAlive = cxn->request.keepAlive;
                make_response_header(&cxn->response);
             }
          }
          break;
-      default:
-         break;
       }
-   } else if (revents & POLLOUT && cxn->state == INTERNAL) {
-      debug(DEBUG_INFO, "cxsock, revent: POLLOUT, state: RESPONSE_HEA\n");
+   } else if (revents & POLLOUT && cxn->state == ST_INTERNAL) {
+      debug(DEBUG_INFO, "cxsock, revent: POLLOUT, state: ST_RESPONSE_HEA\n");
 
       res = write(cxn->socket,
                   cxn->response.buffer,
                   cxn->response.bytesToWrite);
-      cxn->state = cxn->cgi ? CGI_FIL : RESPONSE_FIN;
-   } else if (revents & POLLOUT && cxn->state == RESPONSE_HEA) {
-      debug(DEBUG_INFO, "cxsock, revent: POLLOUT, state: RESPONSE_HEA\n");
+      cxn->state = cxn->cgi ? ST_CGI_FIL : ST_RESPONSE_FIN;
+   } else if (revents & POLLOUT && cxn->state == ST_RESPONSE_HEA) {
+      debug(DEBUG_INFO, "cxsock, revent: POLLOUT, state: ST_RESPONSE_HEA\n");
 
       res = write(cxn->socket,
                   cxn->response.buffer,
                   cxn->response.headerLength);
       cxn->response.bytesToWrite -= res;
-      cxn->state = res == -1 ? RESPONSE_FIN : RESPONSE_FIL;
-   } else if (revents & POLLOUT && cxn->state == RESPONSE_FIL) {
+      cxn->state = res == -1 ? ST_RESPONSE_FIN : ST_RESPONSE_FIL;
+   } else if (revents & POLLOUT && cxn->state == ST_RESPONSE_FIL) {
       debug(DEBUG_INFO, "cxsock, revent: POLLOUT, state: RESPONSE_INP\n");
       ptr = cxn->fileBuf + cxn->response.contentLength -
          cxn->response.bytesToWrite;
@@ -285,21 +291,21 @@ static int process_cxsock_events(struct connection* cxn, short revents) {
                   cxn->response.bytesToWrite);
 
       if (res == -1) {
-         cxn->state = RESPONSE_FIN;
+         cxn->state = ST_RESPONSE_FIN;
       } else {
          cxn->response.bytesToWrite -= res;
-         cxn->state = cxn->response.bytesToWrite ? LOAD_FILE : RESPONSE_FIN;
+         cxn->state = cxn->response.bytesToWrite ? ST_LOAD_FILE : ST_RESPONSE_FIN;
       }
-   } else if (revents & POLLOUT && cxn->state == CGI_FIL) {
+   } else if (revents & POLLOUT && cxn->state == ST_CGI_FIL) {
       if (do_cgi(&cxn->env) == HTTP_INTERNAL) {
          //internal server error here
          //we'd need to go backwards in the state machine
       }
       cxn->response.httpCode = HTTP_OK;
-      cxn->state = RESPONSE_FIN;
+      cxn->state = ST_RESPONSE_FIN;
       return process_cxsock_events(cxn, POLLOUT); //fix me later
-   } else if (revents & POLLOUT && cxn->state == RESPONSE_FIN) {
-      debug(DEBUG_INFO, "cxsock, revent: POLLOUT, state: RESPONSE_FIN\n");
+   } else if (revents & POLLOUT && cxn->state == ST_RESPONSE_FIN) {
+      debug(DEBUG_INFO, "cxsock, revent: POLLOUT, state: ST_RESPONSE_FIN\n");
 
       log_access(cxn);
 
@@ -307,7 +313,7 @@ static int process_cxsock_events(struct connection* cxn, short revents) {
          clean_exit(0);
       } else if (cxn->request.keepAlive && cxn->response.httpCode == HTTP_OK) {
          reset_connection(cxn);
-         cxn->state = REQUEST_INP;
+         cxn->state = ST_REQUEST_INP;
       } else {
          debug(DEBUG_INFO, "Keep alive not specified or "
                "http error encountered; Closing connection\n");
@@ -328,9 +334,9 @@ static int process_cxsock_events(struct connection* cxn, short revents) {
 static int process_cxfile_events(struct connection* cxn, short revents) {
    int err = 0;
 
-   if (revents & POLLIN && cxn->state == LOAD_FILE) {
-      debug(DEBUG_INFO, "cxfile, revent: POLLIN, state: LOAD_FILE\n");
-      cxn->state = RESPONSE_FIL; //(1)
+   if (revents & POLLIN && cxn->state == ST_LOAD_FILE) {
+      debug(DEBUG_INFO, "cxfile, revent: POLLIN, state: ST_LOAD_FILE\n");
+      cxn->state = ST_RESPONSE_FIL; //(1)
    }
 
    return err;
@@ -344,18 +350,18 @@ static int process_request(struct connection* cxn) {
 
    debug(DEBUG_INFO, "Processing request buffer\n");
    res = make_request_header(env, request);
-
    print_request(request);
 
-   response->usingDeflate = request->acceptDeflate;
+   //we're not supporing deflate right now
+   response->usingDeflate = false;
    response->contentLength = request->contentLength;
+   response->keepAlive = request->keepAlive;
 
    //hacked this in for JSON
    if (res == JSON_QUIT) {
       json_response(response, res);
       return CGI_QUIT;
    } if (res >= JSON_ABOUT && res <= JSON_FORTUNE) {
-      cxn->response.keepAlive = cxn->request.keepAlive;
       json_response(response, res);
       return INTERNAL_RESPONSE;
    }
@@ -363,25 +369,21 @@ static int process_request(struct connection* cxn) {
    switch(res) {
    case HTTP_CGI:
       debug(DEBUG_INFO, "Making CGI response header\n");
-      cxn->response.keepAlive = cxn->request.keepAlive;
       internal_response(response, res);
       return HTTP_CGI;
    case CGI_QUIT:
       debug(DEBUG_INFO, "Received quit, starting exit process\n");
-      cxn->response.keepAlive = cxn->request.keepAlive;
       internal_response(response, HTTP_GOODBYE);
       return CGI_QUIT;
    case HTTP_NOTFOUND:
    case HTTP_DENIED: //make the non-cgi open do this as well
    case HTTP_CGISTATUS:
    case HTTP_BADPARAMS:
-      cxn->response.keepAlive = cxn->request.keepAlive;
       internal_response(response, res);
       return INTERNAL_RESPONSE;
    case HTTP_GENLIST:
       if (generate_listing(request->filepath, response)) {
          debug(DEBUG_WARNING, "Generate listing error\n");
-         cxn->response.keepAlive = cxn->request.keepAlive;
          internal_response(response, HTTP_INTERNAL);
       }
       return INTERNAL_RESPONSE;
@@ -391,7 +393,6 @@ static int process_request(struct connection* cxn) {
    case BUFFER_OVERFLOW:
    case MALLOC_FAILED:
       debug(DEBUG_WARNING, "Some misc error.\n");
-      cxn->response.keepAlive = cxn->request.keepAlive;
       internal_response(response, HTTP_INTERNAL);
       return INTERNAL_RESPONSE;
    case 0:
@@ -399,15 +400,13 @@ static int process_request(struct connection* cxn) {
    }
 
    res = open(request->filepath, O_RDONLY | O_NONBLOCK);
-   if (res  == -1 && errno == EACCES) {
-      cxn->response.keepAlive = cxn->request.keepAlive;
+   if (res == -1 && errno == EACCES) {
       internal_response(response, HTTP_DENIED);
       return INTERNAL_RESPONSE;
    }
 
    if (res == -1) {
       perror("open");
-      cxn->response.keepAlive = cxn->request.keepAlive;
       internal_response(response, HTTP_INTERNAL);
       return INTERNAL_RESPONSE;
    }
@@ -424,7 +423,7 @@ static void reset_connection(struct connection* cxn) {
    env = cxn->env;
    connections->erase(cxn->file);
    munmap(cxn->fileBuf, cxn->response.contentLength);
-   fdarr_cntl(REMOVE, cxn->file);
+   fdarr_cntl(FDARR_REMOVE, cxn->file);
    close(cxn->file);
    memset(cxn, 0, sizeof(struct connection));
    cxn->socket = socket;
@@ -435,9 +434,9 @@ static void reset_connection(struct connection* cxn) {
 static void close_connection(struct connection* cxn) {
    debug(DEBUG_INFO, "Closing connection...\n");
 
-   fdarr_cntl(REMOVE, cxn->socket);
+   fdarr_cntl(FDARR_REMOVE, cxn->socket);
    if (cxn->file) {
-      fdarr_cntl(REMOVE, cxn->file);
+      fdarr_cntl(FDARR_REMOVE, cxn->file);
       connections->erase(cxn->file);
       close(cxn->file);
    }
@@ -453,7 +452,6 @@ static int fill_request_buffer(int socket, struct request* request) {
    if ((bytesRead = read(socket,
                         request->buffer + request->bytesUsed,
                         BUF_LEN - request->bytesUsed)) == -1) {
-
       perror("socket read");
       return UNRECOVERABLE;
    } else if (bytesRead == 0) {
@@ -476,10 +474,10 @@ static int fill_request_buffer(int socket, struct request* request) {
 
    debug(DEBUG_INFO, "End of request found\n");
 
-   return 0;
+   return REQUEST_FINISHED;
 }
 
-static int fdarr_cntl(enum CMD cmd, ...) {
+static int fdarr_cntl(enum FDARR_CMD cmd, ...) {
    static struct pollfd* fds = NULL;
    static nfds_t nfds = 0;
    static unsigned int fdarrMaxSize = 50;
@@ -505,21 +503,21 @@ static int fdarr_cntl(enum CMD cmd, ...) {
 
    switch(cmd) {
    default:
-   case GET:
+   case FDARR_GET:
       fdsFill = va_arg(args, struct pollfd **);
       nfdsFill = va_arg(args, nfds_t *);
 
       *fdsFill = fds;
       *nfdsFill = nfds;
       break;
-   case ADD:
+   case FDARR_ADD:
       fds[nfds].fd = va_arg(args, int);
       debug(DEBUG_INFO, "Adding %dth entry(%d) to "
             "pollfd array\n", nfds, fds[nfds].fd);
       fds[nfds].events = (short) va_arg(args, int);
       nfds++;
       break;
-   case MODIFY:
+   case FDARR_MODIFY:
       fd = va_arg(args, int);
       for (i = 0; i < nfds; i++) {
          if (fds[i].fd == fd) {
@@ -529,7 +527,7 @@ static int fdarr_cntl(enum CMD cmd, ...) {
 
       fds[i].events = (short) va_arg(args, int);
       break;
-   case REMOVE:
+   case FDARR_REMOVE:
       fd = va_arg(args, int);
       for (i = 0; i < nfds; i++) {
          if (fds[i].fd == fd) {
@@ -549,7 +547,7 @@ static int fdarr_cntl(enum CMD cmd, ...) {
       }
       nfds--;
       break;
-   case CLEAN_UP:
+   case FDARR_CLEAN_UP:
       debug(DEBUG_INFO, "Freeing pollfd array\n");
       free(fds);
       break;
@@ -592,7 +590,8 @@ static int json_response(struct response* response, int code) {
                  usage.ru_utime.tv_usec +
                  usage.ru_stime.tv_usec) / USEC_PER_SEC;
       timeDiff = ((now.tv_sec * USEC_PER_SEC + now.tv_usec) -
-                  (startTime.tv_sec * USEC_PER_SEC + startTime.tv_usec)) / USEC_PER_SEC;
+                  (startTime.tv_sec * USEC_PER_SEC +
+                   startTime.tv_usec)) / USEC_PER_SEC;
       bytesWritten = sprintf(buf, BODY_JSON_STATUS, numClients, numRequests,
                              errors, timeDiff, cpuTime, memUsage);
       break;
@@ -701,7 +700,8 @@ static int make_response_header(struct response* response) {
    }
 
    if (response->keepAlive) {
-      written += sprintf(response->buffer + written, "Connection: Keep-Alive\r\n");
+      written += sprintf(response->buffer + written,
+                         "Connection: Keep-Alive\r\n");
    }
 
    if (response->usingDeflate) {
@@ -718,7 +718,6 @@ static int make_response_header(struct response* response) {
 
 static int generate_listing(char* filepath, struct response* response) {
    char* buf;
-   //int bytesWritten = 0, bufLen, numDirEntries = 0;
    int bytesWritten = 0, numDirEntries = 0;
    DIR* parent;
    char* str = (char *) calloc(1, strlen(filepath) - LEN_DOCS + 1);
@@ -794,14 +793,14 @@ static int parse_request_declaration(struct request* request, char** filepath) {
    }
 
    if (strcasestr(toks[0], "GET")) {
-      request->type = HTTP_GET;
+      request->type = REQUEST_GET;
    } else {
       debug(DEBUG_WARNING, "Method not supported: %s\n", toks[0]);
       return NOT_ALLOWED; //should result in a 405
    }
 
    *filepath = toks[1];
-   
+
    //the second part of the declaration says what HTTP version we're using
    if (strcasestr(toks[2], "HTTP/1.1")) {
       request->httpVersion = 1;
@@ -820,14 +819,13 @@ static int parse_request_declaration(struct request* request, char** filepath) {
 //the return value of the function indicates whether there were any errors
 //all modification is done through pointers
 static int make_request_header(struct env* env, struct request* request) {
-   char* lineEnd, * tok, * tmp;
    struct stat stats;
+   char* lineEnd, * tok, * tmp;
    char* lines[MAX_TOKS];
    int i, numToks, res;
 
    //find the end of the first line of the request
-   if ((lineEnd = (char * )
-        memmem(request->buffer, request->bytesUsed, "\r\n", 2)) == NULL) {
+   if ((lineEnd = (char * ) memmem(request->buffer, request->bytesUsed, "\r\n", 2)) == NULL) {
       debug(DEBUG_WARNING, "Can't find HTTP request declaration\n");
       return BAD_REQUEST; //should result in a 400
    }
@@ -849,10 +847,13 @@ static int make_request_header(struct env* env, struct request* request) {
    }
    numToks = i;
 
+   request->referer = "";
+   request->userAgent = "";
+
    //we really need to change the way we determine keep-alive
    //http/1.1 specifies persistent unless specifically stated otherwise
    for (i = 0; i < numToks; i++) {
-      if (strcasecmp(lines[i], "Connection: keep-alive") == 0) {
+      if (strcasecmp(lines[i], "Connection: Keep-Alive") == 0) {
          request->keepAlive = true;
       } else if (strcasestr(lines[i], "Accept-Encoding:")) {
          if (strcasestr(lines[i] + strlen("Accept-Encoding:"), "deflate")) {
@@ -863,14 +864,6 @@ static int make_request_header(struct env* env, struct request* request) {
       } else if (strcasestr(lines[i], "User-Agent:")) {
          request->userAgent = lines[i] + strlen("User Agent: ");
       }
-   }
-
-   if (request->referer == NULL) {
-      request->referer = "";
-   }
-
-   if (request->userAgent == NULL) {
-      request->userAgent = "";
    }
 
    url_decode(tmp);
@@ -884,12 +877,11 @@ static int make_request_header(struct env* env, struct request* request) {
 
    if (strstr(tmp, "/json/")) { //check for json
       debug(DEBUG_INFO, "json request: %s\n", tmp);
-      env->query = request->filepath;
+      env->query = tmp;
       return json_request(env);
    }
 
-   strcpy(request->filepath, "docs");
-   strcpy(request->filepath + strlen("docs"), tmp);
+   snprintf(request->filepath, NAME_BUF_LEN, "docs%s", tmp);
 
    if (stat(request->filepath, &stats)) {
       debug(DEBUG_INFO, "File not found... generating 404\n");
@@ -934,7 +926,7 @@ static char* request_declaration_to_string(const struct request* request) {
 //make this into a to_string method some time in the future
 static void print_request(struct request* request) {
    debug(DEBUG_INFO, "Request: %s\n", request_declaration_to_string(request));
-   debug(DEBUG_INFO, "|-HTTP content length: %d bytes\n", request->contentLength);
+   debug(DEBUG_INFO, "|-HTTP content length: %dB\n", request->contentLength);
    debug(DEBUG_INFO, "|-HTTP-Option Referrer: %s\n", request->referer);
    debug(DEBUG_INFO, "|-HTTP-Option User-Agent: %s\n", request->userAgent);
    debug(DEBUG_INFO, "|-HTTP-Option Keep-Alive?: %s\n",
@@ -994,7 +986,9 @@ static void log_access(struct connection* cxn) {
            cxn->request.userAgent);
 }
 
-/*implemented.json - Returns a list of implemented features and associated URLs • about - Returns information about the author of the program
+/*implemented.json
+  - Returns a list of implemented features and associated URLs • about
+  - Returns information about the author of the program
 • quit - Causes the server to quit
 • status - Returns server usage statistics
 */
@@ -1014,7 +1008,7 @@ static int json_request(struct env* env) {
       return JSON_FORTUNE;
    }
 
-   debug(DEBUG_WARNING, "Unsupported JSON operation requested");
+   debug(DEBUG_WARNING, "Unsupported JSON operation requested: %s\n", env->query + LEN_JSON);
    //return DO_JSON;
    return HTTP_NOTFOUND;
 }
@@ -1120,7 +1114,8 @@ static int do_cgi(struct env* env) {
       free(env->filepath);
       return HTTP_INTERNAL;
    } else if (env->childPid == 0) { //the child
-      fcntl(env->mySocket, F_SETFL, fcntl(env->mySocket, F_GETFL) & ~O_NONBLOCK);
+      fcntl(env->mySocket, F_SETFL,
+            fcntl(env->mySocket, F_GETFL) & ~O_NONBLOCK);
       dup2(env->mySocket, 1);
 
       execle(env->filepath, env->filepath, NULL, env->envvars);
@@ -1144,7 +1139,7 @@ static void debug(uint32_t debug, const char* msg, ...) {
    };
    static uintptr_t debugLevel = DEBUG_INFO;
    static char timeBuf[NAME_BUF_LEN];
-   
+
    time_t t = time(NULL);
    va_list args;
 
@@ -1165,7 +1160,7 @@ static void debug(uint32_t debug, const char* msg, ...) {
 static void clean_exit(int unused) {
    connections_t::iterator itr;
 
-   fdarr_cntl(CLEAN_UP);
+   fdarr_cntl(FDARR_CLEAN_UP);
    fclose(accessLog);
 
    for (itr = connections->begin(); itr != connections->end(); itr++) {
