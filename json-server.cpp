@@ -496,25 +496,6 @@ static int process_request(struct connection* cxn) {
 
    cxn->file = res;
    return 0;
-
-   //this is now unnecessary
-   /*switch(res) {
-   default:
-   case BAD_REQUEST:
-   case NOT_ALLOWED:
-   case BUFFER_OVERFLOW:
-   case POSIX_ERROR:
-      debug(DEBUG_WARNING, "Some misc error.\n");
-      response->type = RESPONSE_INTERNAL_ERROR;
-      error_response(response);
-      return INTERNAL_RESPONSE;
-   case EACCES: //we're using the actual errno define here
-      response->type = RESPONSE_FORBIDDEN;
-      error_response(response);
-      return INTERNAL_RESPONSE;
-   case 0:
-      break;
-      }*/
 }
 
 static void reset_connection(struct connection* cxn) {

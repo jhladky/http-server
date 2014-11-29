@@ -22,6 +22,7 @@
 #define INTERNAL_RESPONSE      -10
 #define BAD_REQUEST            -12
 #define FILE_NOT_FOUND         -13
+#define HTTP_CGI               -14
 
 
 ///limitations///
@@ -41,18 +42,6 @@
 ///all other defines///
 #define DEBUG_SET 0xAAAAAAAA
 #define USEC_PER_SEC 100000.0
-#define HTTP_CGI -20
-/*#define HTTP_GENLIST 1001 //V these are internal response codes
-#define HTTP_BADPARAMS 1002
-#define HTTP_CGISTATUS 1003
-#define HTTP_CGI 1004
-#define HTTP_GOODBYE 1005 */
-//JSON related
-/*#define JSON_QUIT 1007
-#define JSON_ABOUT 1008
-#define JSON_IMPLEMENTED 1009
-#define JSON_STATUS 1010
-#define JSON_FORTUNE 1011 */
 #define LEN_INDEX_HTML 10
 #define LEN_DOCS 4
 #define LEN_CGI 4
