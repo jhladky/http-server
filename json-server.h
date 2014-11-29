@@ -18,9 +18,10 @@
 #define FDARR_MODIFIED         -6
 #define CGI_QUIT               -7
 #define BAD_SOCKET             -8
-#define MALLOC_FAILED          -9
+#define POSIX_ERROR            -9
 #define INTERNAL_RESPONSE      -10
-#define BAD_REQUEST            -11
+#define BAD_REQUEST            -12
+#define FILE_NOT_FOUND         -13
 
 
 ///limitations///
@@ -32,6 +33,7 @@
 #define NUM_ENV_VARS 8
 #define NUM_DEBUG_LEVELS 3
 #define NUM_HTTP_REQUEST_TYPES 4
+#define NUM_HTTP_RESPONSE_TYPES 6
 #define NUM_REQUEST_STATES 4
 #define NUM_REQ_DECL_PARTS 3
 
@@ -39,26 +41,18 @@
 ///all other defines///
 #define DEBUG_SET 0xAAAAAAAA
 #define USEC_PER_SEC 100000.0
-#define MAX_HTTP_CODE 600
-#define HTTP_OK 200
-#define HTTP_NOTFOUND 404
-#define HTTP_DENIED 403
-#define HTTP_INTERNAL 500
-//these aren't HTTP error codes, but we pass them
-//into make_response anyway. kludgy, but unambiguous
-//as HTTP codes stop at 600
-#define HTTP_GENLIST 1001 //V these are internal response codes
+#define HTTP_CGI -20
+/*#define HTTP_GENLIST 1001 //V these are internal response codes
 #define HTTP_BADPARAMS 1002
 #define HTTP_CGISTATUS 1003
 #define HTTP_CGI 1004
-#define HTTP_GOODBYE 1005
+#define HTTP_GOODBYE 1005 */
 //JSON related
-#define DO_JSON 1006
-#define JSON_QUIT 1007
+/*#define JSON_QUIT 1007
 #define JSON_ABOUT 1008
 #define JSON_IMPLEMENTED 1009
 #define JSON_STATUS 1010
-#define JSON_FORTUNE 1011
+#define JSON_FORTUNE 1011 */
 #define LEN_INDEX_HTML 10
 #define LEN_DOCS 4
 #define LEN_CGI 4
@@ -89,6 +83,21 @@
 #define BODY_JSON_STATUS "{\n\"num_clients\": %d, \"num_requests\": %d, \"errors\": %d, \"uptime\": %lf, \"cpu_time\": %lf, \"memory_used\": %ld\n}"
 
 ///structs, unions, and enums///
+enum CGI_CMD {
+   CGI_BADPARAMS,
+   CGI_STATUS,
+   CGI_DO,
+   CGI_GOODBYE
+};
+
+enum JSON_CMD {
+   JSON_QUIT,
+   JSON_ABOUT,
+   JSON_IMPLEMENTED,
+   JSON_STATUS,
+   JSON_FORTUNE
+};
+
 enum FDARR_CMD {
    FDARR_GET,
    FDARR_ADD,
@@ -122,19 +131,19 @@ enum REQUEST_TYPE {
 };
 
 enum RESPONSE_TYPE {
-   RESPONSE_OK,
-   RESPONSE_BAD_REQUEST,
-   RESPONSE_METHOD_NOT_ALLOWED,
-   RESPONSE_FORBIDDEN,
-   RESPONSE_NOT_FOUND,
-   RESPONSE_INTERNAL_ERROR
+   RESPONSE_OK,                  // 200
+   RESPONSE_BAD_REQUEST,         // 400
+   RESPONSE_METHOD_NOT_ALLOWED,  // 405
+   RESPONSE_FORBIDDEN,           // 403
+   RESPONSE_NOT_FOUND,           // 404
+   RESPONSE_INTERNAL_ERROR       // 500
 };
 
 struct request {
    char buffer[BUF_LEN];
    enum REQUEST_STATE state;
    enum REQUEST_TYPE type;      //this and the two below come from the request declaration
-   int httpVersion;             //-1 for HTTP/0.9, 0 for HTTP/1.0, 1 for HTTP/1.1xo
+   int httpVersion;             //-1 for HTTP/0.9, 0 for HTTP/1.0, 1 for HTTP/1.1
    char filepath[NAME_BUF_LEN]; //we have our own buffer for this so we don't mess up the main buffer
    unsigned int bytesUsed;
    unsigned int contentLength;
@@ -153,7 +162,6 @@ struct response {
    const char* contentType; //get this from the file ext
    bool usingDeflate;
    bool keepAlive;
-   unsigned short httpCode; //200, 403, 404, etc.
    unsigned int bytesToWrite;
 } response;
 
@@ -181,16 +189,18 @@ struct connection {
 
 
 ///function prototypes///
+static int error_response(struct response* response);
 static int make_response_header(struct response* response);
-static int make_request_header(struct env* env, struct request* request);
-static int internal_response(struct response* response, int code);
-static int json_response(struct response* response, int code);
+static int make_request_header(struct request* request);
+static int cgi_response(struct response* response, enum CGI_CMD cmd);
+static int json_response(struct response* response, enum JSON_CMD cmd);
 static int generate_listing(char* filepath, struct response* response);
-static int cgi_request(struct env* env);
-static int json_request(struct env* env);
+static int cgi_request(struct env* env, enum CGI_CMD* cmd);
 static int fdarr_cntl(enum FDARR_CMD cmd, ...);
 static int do_cgi(struct env* env);
 static int process_request(struct connection* cxn);
+static int process_cgi(struct connection* cxn);
+static int process_json(struct connection* cxn);
 static int process_mysock_events(int socket, short revents);
 static int process_cxfile_events(struct connection* cxn, short revents);
 static int process_cxsock_events(struct connection* cxn, short revents);

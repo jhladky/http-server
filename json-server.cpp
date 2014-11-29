@@ -106,7 +106,7 @@ int main(int argc, char* argv[]) {
       pexit("listen");
    }
 
-   if (fdarr_cntl(FDARR_ADD, mySock, POLLIN) == MALLOC_FAILED) {
+   if (fdarr_cntl(FDARR_ADD, mySock, POLLIN) == POSIX_ERROR) {
       debug(DEBUG_ERROR, "malloc failed\n");
       exit(EXIT_FAILURE);
    }
@@ -147,7 +147,7 @@ int main(int argc, char* argv[]) {
             break;
          } else if (res == BAD_SOCKET) {
             debug(DEBUG_WARNING, "Error accepting socket connection\n");
-         } else if (res == MALLOC_FAILED) {
+         } else if (res == POSIX_ERROR) {
             debug(DEBUG_ERROR, "Allocating connections struct failed\n");
             //maybe change this behavior in the future
             exit(EXIT_FAILURE);
@@ -174,7 +174,7 @@ static int process_mysock_events(int socket, short revents) {
       debug(DEBUG_INFO, "mysock, revent: POLLIN, state: N/A\n");
       cxn = (struct connection *) calloc(1, sizeof(struct connection)); //(1)
       if (cxn == NULL) {
-         return MALLOC_FAILED;
+         return POSIX_ERROR;
       }
 
       cxn->socket = accept(socket, (struct sockaddr *) &me, &sockSize);
@@ -184,7 +184,7 @@ static int process_mysock_events(int socket, short revents) {
       }
 
       cxn->state = ST_REQUEST_INP;
-      cxn->response.httpCode = HTTP_OK;
+      cxn->response.type = RESPONSE_OK;
       cxn->env.mySocket = cxn->socket;
       cxn->env.serverSocket = socket;
       debug(DEBUG_INFO, "Connected to  %s\n",
@@ -209,7 +209,8 @@ static int request_state_zero_read(struct connection* cxn) {
 static int request_state_error(struct connection* cxn) {
    debug(DEBUG_WARNING, "Error processing request...sending 500!\n");
    cxn->state = ST_INTERNAL;
-   internal_response(&cxn->response, HTTP_INTERNAL);
+   cxn->response.type = RESPONSE_INTERNAL_ERROR;
+   error_response(&cxn->response);
    return 0;
 }
 
@@ -238,9 +239,10 @@ static int request_state_finished(struct connection* cxn) {
                                    PROT_READ, MAP_PRIVATE, cxn->file, 0);
       if ((intptr_t) cxn->fileBuf == -1) {
          cxn->state = ST_INTERNAL;
-         perror("mmap");
+         debug(DEBUG_WARNING, "mmap: %s\n", strerror(errno));
          close(cxn->file);
-         internal_response(&cxn->response, HTTP_INTERNAL);
+         cxn->response.type = RESPONSE_INTERNAL_ERROR;
+         error_response(&cxn->response);
       } else {
          cxn->state = ST_RESPONSE_HEA;
          fdarr_cntl(FDARR_ADD, cxn->file, POLLIN);
@@ -304,11 +306,11 @@ static int process_cxsock_events(struct connection* cxn, short revents) {
          cxn->state = cxn->response.bytesToWrite ? ST_LOAD_FILE : ST_RESPONSE_FIN;
       }
    } else if (revents & POLLOUT && cxn->state == ST_CGI_FIL) {
-      if (do_cgi(&cxn->env) == HTTP_INTERNAL) {
+      if (do_cgi(&cxn->env) == POSIX_ERROR) {
          //internal server error here
          //we'd need to go backwards in the state machine
       }
-      cxn->response.httpCode = HTTP_OK;
+      cxn->response.type = RESPONSE_OK;
       cxn->state = ST_RESPONSE_FIN;
       return process_cxsock_events(cxn, POLLOUT); //fix me later
    } else if (revents & POLLOUT && cxn->state == ST_RESPONSE_FIN) {
@@ -318,7 +320,7 @@ static int process_cxsock_events(struct connection* cxn, short revents) {
 
       if (cxn->quit) {
          clean_exit(0);
-      } else if (cxn->request.keepAlive && cxn->response.httpCode == HTTP_OK) {
+      } else if (cxn->request.keepAlive && cxn->response.type == RESPONSE_OK) {
          reset_connection(cxn);
          cxn->state = ST_REQUEST_INP;
       } else {
@@ -349,14 +351,80 @@ static int process_cxfile_events(struct connection* cxn, short revents) {
    return err;
 }
 
+static int process_cgi(struct connection* cxn) {
+   struct response* response = &cxn->response;
+   enum CGI_CMD cmd;
+
+   switch(cgi_request(&cxn->env, &cmd)) {
+      case FILE_NOT_FOUND:
+      response->type = RESPONSE_NOT_FOUND;
+      error_response(response);
+      return INTERNAL_RESPONSE;
+   case EACCES: //we're using the actual errno define here
+      response->type = RESPONSE_FORBIDDEN;
+      error_response(response);
+      return INTERNAL_RESPONSE;
+   case POSIX_ERROR:
+      response->type = RESPONSE_INTERNAL_ERROR;
+      error_response(response);
+      return INTERNAL_RESPONSE;
+   }
+
+   if (cmd == CGI_GOODBYE) {
+      debug(DEBUG_INFO, "Received quit, starting exit process\n");
+      cgi_response(response, cmd);
+      return CGI_QUIT;
+   } else if (cmd == CGI_DO) {
+      cgi_response(response, cmd);
+      return HTTP_CGI;
+   } else {
+      debug(DEBUG_INFO, "Doing some CGI thing.\n");
+      cgi_response(&cxn->response, cmd);
+      return INTERNAL_RESPONSE;
+   }
+}
+
+static int process_json(struct connection* cxn) {
+   struct response* response = &cxn->response;
+   struct env* env = &cxn->env;
+
+   if (strcmp(env->query, "/json/") == 0) {
+      response->type = RESPONSE_NOT_FOUND;
+      error_response(response);
+      return INTERNAL_RESPONSE;
+   } else if (strcmp(env->query + LEN_JSON, "quit") == 0) {
+      json_response(response, JSON_QUIT);
+      return CGI_QUIT;
+   } else if (strcmp(env->query + LEN_JSON, "about.json") == 0) {
+      json_response(response, JSON_ABOUT);
+      return INTERNAL_RESPONSE;
+   } else if (strcmp(env->query + LEN_JSON, "implemented.json") == 0) {
+      json_response(response, JSON_IMPLEMENTED);
+      return INTERNAL_RESPONSE;
+   } else if (strcmp(env->query + LEN_JSON, "status.json") == 0) {
+      json_response(response, JSON_STATUS);
+      return INTERNAL_RESPONSE;
+   } else if (strcmp(env->query + LEN_JSON, "fortune.json") == 0) {
+      json_response(response, JSON_FORTUNE);
+      return INTERNAL_RESPONSE;
+   }
+
+   debug(DEBUG_WARNING, "Unsupported JSON operation requested: %s\n", env->query + LEN_JSON);
+   response->type = RESPONSE_NOT_FOUND;
+   error_response(response);
+   return INTERNAL_RESPONSE;
+}
+
 static int process_request(struct connection* cxn) {
+   char* tmp = cxn->request.filepath + LEN_DOCS;
+   struct stat stats;
    struct env* env = &cxn->env;
    struct request* request = &cxn->request;
    struct response* response = &cxn->response;
    int res;
 
    debug(DEBUG_INFO, "Processing request buffer\n");
-   res = make_request_header(env, request);
+   res = make_request_header(request);
    print_request(request);
 
    //we're not supporing deflate right now
@@ -364,62 +432,89 @@ static int process_request(struct connection* cxn) {
    response->contentLength = request->contentLength;
    response->keepAlive = request->keepAlive;
 
-   //hacked this in for JSON
-   if (res == JSON_QUIT) {
-      json_response(response, res);
-      return CGI_QUIT;
-   } if (res >= JSON_ABOUT && res <= JSON_FORTUNE) {
-      json_response(response, res);
+   /* This is really three separate errors that should result in three separate
+    * different types of HTTP responses, 405, 500, and 400, respectively
+    * but we're combining them into a 500 right now.
+    */
+   if (res == NOT_ALLOWED || res == BUFFER_OVERFLOW || res == BAD_REQUEST) {
+      response->type = RESPONSE_INTERNAL_ERROR;
+      error_response(response);
       return INTERNAL_RESPONSE;
    }
 
-   switch(res) {
-   case HTTP_CGI:
-      debug(DEBUG_INFO, "Making CGI response header\n");
-      internal_response(response, res);
-      return HTTP_CGI;
-   case CGI_QUIT:
-      debug(DEBUG_INFO, "Received quit, starting exit process\n");
-      internal_response(response, HTTP_GOODBYE);
-      return CGI_QUIT;
-   case HTTP_NOTFOUND:
-   case HTTP_DENIED: //make the non-cgi open do this as well
-   case HTTP_CGISTATUS:
-   case HTTP_BADPARAMS:
-      internal_response(response, res);
-      return INTERNAL_RESPONSE;
-   case HTTP_GENLIST:
-      if (generate_listing(request->filepath, response)) {
-         debug(DEBUG_WARNING, "Generate listing error\n");
-         internal_response(response, HTTP_INTERNAL);
-      }
-      return INTERNAL_RESPONSE;
-   default:
-   case BAD_REQUEST:
-   case NOT_ALLOWED:
-   case BUFFER_OVERFLOW:
-   case MALLOC_FAILED:
-      debug(DEBUG_WARNING, "Some misc error.\n");
-      internal_response(response, HTTP_INTERNAL);
-      return INTERNAL_RESPONSE;
-   case 0:
-      break;
+   if ((strstr(tmp, "/cgi-bin/"))) { //check for cgi
+      debug(DEBUG_INFO, "cgi request: %s\n", tmp);
+      env->method = "GET"; //FIX THIS SOME TIME IN THE FUTURE...
+      env->query = tmp;
+      return process_cgi(cxn);
    }
+
+   if (strstr(tmp, "/json/")) { //check for json
+      debug(DEBUG_INFO, "json request: %s\n", tmp);
+      env->query = tmp;
+      return process_json(cxn);
+   }
+   
+   if (stat(request->filepath, &stats)) {
+      debug(DEBUG_INFO, "File not found... generating 404\n");
+      response->type = RESPONSE_NOT_FOUND;
+      error_response(response);
+      return INTERNAL_RESPONSE;
+   }
+
+   if (S_ISDIR(stats.st_mode)) {
+      if (request->filepath[strlen(request->filepath) - 1] != '/') {
+         strcat(request->filepath, "/");
+      }
+      strcat(request->filepath, "index.html");
+
+      //maybe change this to an access() call
+      if (stat(request->filepath, &stats)) {
+         debug(DEBUG_INFO, "Generating directory listing\n");
+         if (generate_listing(request->filepath, response)) {
+            debug(DEBUG_WARNING, "Generate listing error\n");
+            response->type = RESPONSE_INTERNAL_ERROR;
+            error_response(response);
+         }
+         return INTERNAL_RESPONSE;
+      }
+   }
+
+   request->contentLength = stats.st_size;
 
    res = open(request->filepath, O_RDONLY | O_NONBLOCK);
    if (res == -1 && errno == EACCES) {
-      internal_response(response, HTTP_DENIED);
+      response->type = RESPONSE_FORBIDDEN;
+      error_response(response);
       return INTERNAL_RESPONSE;
-   }
-
-   if (res == -1) {
-      perror("open");
-      internal_response(response, HTTP_INTERNAL);
+   } else if (res == -1) {
+      debug(DEBUG_WARNING, "popen: %s\n", strerror(errno));
+      response->type = RESPONSE_INTERNAL_ERROR;
+      error_response(response);
       return INTERNAL_RESPONSE;
    }
 
    cxn->file = res;
    return 0;
+
+   //this is now unnecessary
+   /*switch(res) {
+   default:
+   case BAD_REQUEST:
+   case NOT_ALLOWED:
+   case BUFFER_OVERFLOW:
+   case POSIX_ERROR:
+      debug(DEBUG_WARNING, "Some misc error.\n");
+      response->type = RESPONSE_INTERNAL_ERROR;
+      error_response(response);
+      return INTERNAL_RESPONSE;
+   case EACCES: //we're using the actual errno define here
+      response->type = RESPONSE_FORBIDDEN;
+      error_response(response);
+      return INTERNAL_RESPONSE;
+   case 0:
+      break;
+      }*/
 }
 
 static void reset_connection(struct connection* cxn) {
@@ -435,7 +530,7 @@ static void reset_connection(struct connection* cxn) {
    memset(cxn, 0, sizeof(struct connection));
    cxn->socket = socket;
    cxn->env = env;
-   cxn->response.httpCode = HTTP_OK;
+   cxn->response.type = RESPONSE_OK;
 }
 
 static void close_connection(struct connection* cxn) {
@@ -499,7 +594,7 @@ static int fdarr_cntl(enum FDARR_CMD cmd, ...) {
                                       fdarrMaxSize * sizeof(struct pollfd));
       if (fds == NULL) {
          debug(DEBUG_WARNING, "Allocating pollfd array failed\n");
-         return MALLOC_FAILED;
+         return POSIX_ERROR;
       }
       err = STRUCT_SIZE_CHANGE;
    }
@@ -560,7 +655,7 @@ static int fdarr_cntl(enum FDARR_CMD cmd, ...) {
    return err;
 }
 
-static int json_response(struct response* response, int code) {
+static int json_response(struct response* response, enum JSON_CMD cmd) {
    int bytesWritten = 0;
    long memUsage;
    double cpuTime, timeDiff;
@@ -568,7 +663,7 @@ static int json_response(struct response* response, int code) {
    struct timeval now;
    char buf[BUF_LEN];
 
-   switch(code) {
+   switch(cmd) {
    case JSON_IMPLEMENTED:
       debug(DEBUG_INFO, "JSON: doing implemented.json\n");
       bytesWritten = sprintf(buf, "%s", BODY_JSON_IMPLEMENTED_1);
@@ -585,7 +680,8 @@ static int json_response(struct response* response, int code) {
       debug(DEBUG_INFO, "JSON: doing status.json\n");
       if (getrusage(RUSAGE_SELF, &usage) == -1 ||
           gettimeofday(&now, NULL) == -1) {
-         return internal_response(response, HTTP_INTERNAL);
+         response->type = RESPONSE_INTERNAL_ERROR;
+         return error_response(response);
       }
       memUsage = usage.ru_ixrss + usage.ru_idrss + usage.ru_isrss;
       cpuTime = (usage.ru_utime.tv_sec * USEC_PER_SEC +
@@ -604,7 +700,7 @@ static int json_response(struct response* response, int code) {
       break;
    }
 
-   response->httpCode = HTTP_OK;
+   response->type = RESPONSE_OK;
    response->contentLength = bytesWritten;
    response->contentType = "application/json";
 
@@ -614,62 +710,74 @@ static int json_response(struct response* response, int code) {
    return 0;
 }
 
-static int internal_response(struct response* response, int code) {
-   int realCode = code;
+//an error response is a response that's not the normal HTTP 200 OK
+static int error_response(struct response* response) {
    char buf[BUF_LEN];
-   time_t t = time(NULL);
    int bytesWritten = 0;
-
-   switch(code) {
-   case HTTP_DENIED:
-      errors++;
-      debug(DEBUG_INFO, "Sending error 403 Denied\n");
-      bytesWritten = sprintf(buf, "%s", BODY_403);
-      break;
-   case HTTP_NOTFOUND:
+   
+   switch(response->type) {
+   case RESPONSE_BAD_REQUEST:
+   case RESPONSE_METHOD_NOT_ALLOWED:
+   case RESPONSE_NOT_FOUND:
       errors++;
       debug(DEBUG_INFO, "Sending error 404 Not Found\n");
       bytesWritten = sprintf(buf, "%s", BODY_404);
       break;
-   case HTTP_BADPARAMS:
+   case RESPONSE_FORBIDDEN:
       errors++;
-      debug(DEBUG_INFO, "Sending Bad Params message\n");
-      bytesWritten = sprintf(buf, "Bad Params!");
-      code = HTTP_OK;
+      debug(DEBUG_INFO, "Sending error 403 Forbidden\n");
+      bytesWritten = sprintf(buf, "%s", BODY_403);
       break;
-   case HTTP_GOODBYE:
-      debug(DEBUG_INFO, "Sending Goodbye message\n");
-      bytesWritten = sprintf(buf, "Goodbye!");
-      code = HTTP_OK;
-      break;
-   case HTTP_CGISTATUS:
-      debug(DEBUG_INFO, "Sending CGI status message\n");
-      bytesWritten = sprintf(
-         buf, "%sServer Process ID: %d<BR>\nCurrent Time: %s%s",
-         BODY_STATUS_BEGIN, getpid(), asctime(localtime(&t)), BODY_STATUS_END);
-      code = HTTP_OK;
-      break;
-   case HTTP_CGI:
-      debug(DEBUG_INFO, "Sending CGI response line\n");
-      bytesWritten = sprintf(response->buffer, "HTTP/1.1 200 OK\r\n");
-      response->httpCode = HTTP_OK;
-      response->bytesToWrite = response->bytesUsed =
-         response->headerLength = bytesWritten;
-      return 0;
    default:
-   case HTTP_INTERNAL:
+   case RESPONSE_INTERNAL_ERROR:
       errors++;
       debug(DEBUG_WARNING, "Sending error 500 Internal\n");
       bytesWritten = sprintf(buf, "%s", BODY_500);
       break;
    }
 
-   response->httpCode = code;
    response->contentLength = bytesWritten;
-   response->contentType = (realCode == HTTP_BADPARAMS ||
-                            realCode == HTTP_GOODBYE) ?
-      "text/plain" : "text/html";
+   response->contentType = "text/html";
+   make_response_header(response);
+   memcpy(response->buffer + response->headerLength, buf, bytesWritten);
+   response->bytesUsed += bytesWritten;
 
+   return 0;
+}
+
+static int cgi_response(struct response* response, enum CGI_CMD cmd) {
+   char buf[BUF_LEN];
+   time_t t = time(NULL);
+   int bytesWritten = 0;
+
+   switch(cmd) {
+   case CGI_BADPARAMS:
+      errors++;
+      debug(DEBUG_INFO, "Sending Bad Params message\n");
+      bytesWritten = sprintf(buf, "Bad Params!");
+      break;
+   case CGI_GOODBYE:
+      debug(DEBUG_INFO, "Sending Goodbye message\n");
+      bytesWritten = sprintf(buf, "Goodbye!");
+      break;
+   case CGI_STATUS:
+      debug(DEBUG_INFO, "Sending CGI status message\n");
+      bytesWritten = sprintf(
+         buf, "%sServer Process ID: %d<BR>\nCurrent Time: %s%s",
+         BODY_STATUS_BEGIN, getpid(), asctime(localtime(&t)), BODY_STATUS_END);
+      break;
+   case CGI_DO:
+      debug(DEBUG_INFO, "Sending CGI response line\n");
+      bytesWritten = sprintf(response->buffer, "HTTP/1.1 200 OK\r\n");
+      response->bytesToWrite = response->bytesUsed =
+         response->headerLength = bytesWritten;
+      return 0;
+   }
+
+   response->contentLength = bytesWritten;
+   response->contentType = (cmd == CGI_BADPARAMS || cmd == CGI_GOODBYE) ?
+      "text/plain" : "text/html";
+   response->type = RESPONSE_OK;
    make_response_header(response);
    memcpy(response->buffer + response->headerLength, buf, bytesWritten);
    response->bytesUsed += bytesWritten;
@@ -678,24 +786,18 @@ static int internal_response(struct response* response, int code) {
 
 //overloaded initally
 static int make_response_header(struct response* response) {
-   int written = 0;
+   static const char* responseType2String[NUM_HTTP_RESPONSE_TYPES] = {
+      "200 OK",
+      "404 Not Found",
+      "404 Not Found",
+      "403 Forbidden",
+      "404 Not Found",
+      "500 Internal Server Error"
+   };
+   int written;
 
-   switch(response->httpCode) {
-   case HTTP_OK:
-      written = sprintf(response->buffer, "HTTP/1.1 200 OK\r\n");
-      break;
-   case HTTP_NOTFOUND:
-      written = sprintf(response->buffer, "HTTP/1.1 404 Not Found\r\n");
-      break;
-   case HTTP_DENIED:
-      written = sprintf(response->buffer, "HTTP/1.1 403 Forbidden\r\n");
-      break;
-   default:
-   case HTTP_INTERNAL:
-      written = sprintf(response->buffer,
-                        "HTTP/1.1 500 Internal Server Error\r\n");
-      break;
-   }
+   written = snprintf(response->buffer, BUF_LEN, "HTTP/1.1 %s\r\n",
+                      responseType2String[response->type]);
 
    if (response->contentType) {
       written += sprintf(response->buffer + written,
@@ -730,7 +832,7 @@ static int generate_listing(char* filepath, struct response* response) {
 
    if (str == NULL) {
       debug(DEBUG_WARNING, "Allocating filepath copy failed\n");
-      return MALLOC_FAILED;
+      return POSIX_ERROR;
    }
 
    memcpy(str, filepath + LEN_DOCS, strlen(filepath) - LEN_DOCS + 1);
@@ -746,7 +848,7 @@ static int generate_listing(char* filepath, struct response* response) {
    if (buf == NULL) {
       debug(DEBUG_WARNING, "Allocating generate listing buffer failed\n");
       free(str);
-      return MALLOC_FAILED;
+      return POSIX_ERROR;
    }
    //bufLen = AVG_LISTING_LEN * numDirEntries;
 
@@ -765,7 +867,7 @@ static int generate_listing(char* filepath, struct response* response) {
    bytesWritten += sprintf(buf + bytesWritten, "%s", BODY_LISTING_END);
 
    response->contentType = "text/html";
-   response->httpCode = 200;
+   response->type = RESPONSE_OK;
    response->contentLength = bytesWritten;
 
    make_response_header(response);
@@ -821,8 +923,7 @@ static int parse_request_declaration(struct request* request, char** filepath) {
 
 //the return value of the function indicates whether there were any errors
 //all modification is done through pointers
-static int make_request_header(struct env* env, struct request* request) {
-   struct stat stats;
+static int make_request_header(struct request* request) {
    char* lineEnd, * tok, * tmp;
    char* lines[MAX_TOKS];
    int i, numToks, res;
@@ -868,47 +969,9 @@ static int make_request_header(struct env* env, struct request* request) {
          request->userAgent = lines[i] + strlen("User Agent: ");
       }
    }
-   
-   //so imo this is where we should end make_request_header, actually...
-   
    url_decode(tmp);
-
-   if ((strstr(tmp, "/cgi-bin/"))) { //check for cgi
-      debug(DEBUG_INFO, "cgi request: %s\n", tmp);
-      env->method = "GET"; //FIX THIS SOME TIME IN THE FUTURE...
-      env->query = tmp;
-      return cgi_request(env);
-   }
-
-   if (strstr(tmp, "/json/")) { //check for json
-      debug(DEBUG_INFO, "json request: %s\n", tmp);
-      env->query = tmp;
-      return json_request(env);
-   }
-
    snprintf(request->filepath, NAME_BUF_LEN, "docs%s", tmp);
-
-   if (stat(request->filepath, &stats)) {
-      debug(DEBUG_INFO, "File not found... generating 404\n");
-      return HTTP_NOTFOUND; //this is a genuine 404
-   }
-
-   if (S_ISDIR(stats.st_mode)) {
-      if (request->filepath[strlen(request->filepath) - 1] != '/') {
-         strcat(request->filepath, "/");
-      }
-      strcat(request->filepath, "index.html");
-
-      //maybe change this to an access() call
-      if (stat(request->filepath, &stats)) {
-         debug(DEBUG_INFO, "Generating directory listing\n");
-         //this is where we generate the listing
-         return HTTP_GENLIST;
-      }
-   }
-
-   request->contentLength = stats.st_size;
-   return 0;
+   return 0;   
 }
 
 static inline const char* bool_to_string(bool b) {
@@ -971,6 +1034,9 @@ static void url_decode(char* url) {
 //[requesting host] -- [[time]] "[request line]"
 //[http code] [filesize] [referer] [user agent]
 static void log_access(struct connection* cxn) {
+   static int responseType2Code[NUM_HTTP_RESPONSE_TYPES] = {
+      200, 400, 405, 403, 404, 500
+   };
    struct sockaddr_in6 me;
    socklen_t sockSize = sizeof(struct sockaddr_in6);
    char timeBuf[NAME_BUF_LEN], v6buf[INET6_ADDRSTRLEN];
@@ -985,41 +1051,14 @@ static void log_access(struct connection* cxn) {
            inet_ntop(AF_INET6, &me.sin6_addr, v6buf, INET6_ADDRSTRLEN),
            timeBuf,
            request_declaration_to_string(&cxn->request),
-           cxn->response.httpCode,
+           responseType2Code[cxn->response.type],
            cxn->response.contentLength,
            cxn->request.referer,
            cxn->request.userAgent);
 }
 
-/*implemented.json
-  - Returns a list of implemented features and associated URLs • about
-  - Returns information about the author of the program
-• quit - Causes the server to quit
-• status - Returns server usage statistics
-*/
-
-static int json_request(struct env* env) {
-   if (strcmp(env->query, "/json/") == 0) {
-      return HTTP_NOTFOUND;
-   } else if (strcmp(env->query + LEN_JSON, "quit") == 0) {
-      return JSON_QUIT;
-   } else if (strcmp(env->query + LEN_JSON, "about.json") == 0) {
-      return JSON_ABOUT;
-   } else if (strcmp(env->query + LEN_JSON, "implemented.json") == 0) {
-      return JSON_IMPLEMENTED;
-   } else if (strcmp(env->query + LEN_JSON, "status.json") == 0) {
-      return JSON_STATUS;
-   } else if (strcmp(env->query + LEN_JSON, "fortune.json") == 0) {
-      return JSON_FORTUNE;
-   }
-
-   debug(DEBUG_WARNING, "Unsupported JSON operation requested: %s\n", env->query + LEN_JSON);
-   //return DO_JSON;
-   return HTTP_NOTFOUND;
-}
-
 // In pipes 0 is for writing, 1 is for reading
-static int cgi_request(struct env* env) {
+static int cgi_request(struct env* env, enum CGI_CMD* cmd) {
    socklen_t sockSize = sizeof(struct sockaddr_in6);
    struct sockaddr_in6 me;
    struct sockaddr_in6 server;
@@ -1029,17 +1068,19 @@ static int cgi_request(struct env* env) {
    bool hasParams = false;
 
    if (strstr(env->query + LEN_CGI_BIN, "quit")) {
-      return strcmp(env->query + strlen("/cgi-bin/quit"), "?confirm=1") ?
-         HTTP_BADPARAMS : CGI_QUIT;
+      *cmd = strcmp(env->query + strlen("/cgi-bin/quit"), "?confirm=1") ?
+         CGI_BADPARAMS : CGI_GOODBYE;
+      return 0;
    }
 
    if (strcmp(env->query + LEN_CGI_BIN, "status") == 0) {
       debug(DEBUG_INFO, "cgi status requested\n");
-      return HTTP_CGISTATUS;
+      *cmd = CGI_STATUS;
+      return 0;
    }
 
    if (strcmp(env->query, "/cgi-bin/") == 0) {
-      return HTTP_NOTFOUND;
+      return FILE_NOT_FOUND;
    }
 
    len = strlen(env->query) - LEN_CGI_BIN;
@@ -1051,7 +1092,7 @@ static int cgi_request(struct env* env) {
    env->filepath = (char *) calloc(1, len + LEN_CGI + 1);
    if (env->filepath == NULL) {
       debug(DEBUG_WARNING, "Failed to allocate cgi filepath\n");
-      return MALLOC_FAILED;
+      return POSIX_ERROR;
    }
 
    memcpy(env->filepath + LEN_CGI, env->query + LEN_CGI_BIN, len);
@@ -1062,9 +1103,9 @@ static int cgi_request(struct env* env) {
    if (access(env->filepath, X_OK)) {
       free(env->filepath);
       switch(errno) {
-      case ENOENT: return HTTP_NOTFOUND;
-      case EACCES: return HTTP_DENIED;
-      default: return HTTP_INTERNAL;
+      case ENOENT: return FILE_NOT_FOUND;
+      case EACCES: return errno;
+      default: return POSIX_ERROR;
       }
    }
 
@@ -1072,14 +1113,14 @@ static int cgi_request(struct env* env) {
       getsockname(env->mySocket, (struct sockaddr *) &me, &sockSize)) {
       debug(DEBUG_WARNING, "Error getting server socket name\n");
       free(env->filepath);
-      return HTTP_INTERNAL;
+      return POSIX_ERROR;
    }
 
    envvarSpace = (char *) calloc(NUM_ENV_VARS, ENV_BUF_LEN);
    if (envvarSpace == NULL) {
       debug(DEBUG_WARNING, "Allocating envvar space failed\n");
       free(env->filepath);
-      return MALLOC_FAILED;
+      return POSIX_ERROR;
    }
 
    for (i = 0; i < NUM_ENV_VARS; i++) {
@@ -1108,16 +1149,17 @@ static int cgi_request(struct env* env) {
    strcpy(env->envvars[7], "SERVER_PROTOCOL=HTTP/1.1");
    env->envvars[8] = NULL;
 
-   return HTTP_CGI;
+   *cmd = CGI_DO;
+   return 0;
 }
 
 static int do_cgi(struct env* env) {
    debug(DEBUG_INFO, "CGI operation in progress\n");
 
    if ((env->childPid = fork()) == -1) {
-      debug(DEBUG_WARNING, "fork failed\n");
+      debug(DEBUG_WARNING, "fork: %s\n", strerror(errno));
       free(env->filepath);
-      return HTTP_INTERNAL;
+      return POSIX_ERROR;
    } else if (env->childPid == 0) { //the child
       fcntl(env->mySocket, F_SETFL,
             fcntl(env->mySocket, F_GETFL) & ~O_NONBLOCK);
