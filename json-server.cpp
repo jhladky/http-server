@@ -140,7 +140,7 @@ int main(int argc, char* argv[]) {
             res = process_cxfile_events(connections->at(fd), fds[i].revents);
          }
 
-         //if  the fdarr was modified, break from the loop
+         //if the fdarr was modified, break from the loop
          //and start over completely with the right nfds value
          if (res == FDARR_MODIFIED) {
             debug(DEBUG_INFO, "Fdarr modified, breaking\n");
@@ -149,7 +149,6 @@ int main(int argc, char* argv[]) {
             debug(DEBUG_WARNING, "Error accepting socket connection\n");
          } else if (res == POSIX_ERROR) {
             debug(DEBUG_ERROR, "Allocating connections struct failed\n");
-            //maybe change this behavior in the future
             exit(EXIT_FAILURE);
          }
       }
@@ -187,7 +186,7 @@ static int process_mysock_events(int socket, short revents) {
       cxn->response.type = RESPONSE_OK;
       cxn->env.mySocket = cxn->socket;
       cxn->env.serverSocket = socket;
-      debug(DEBUG_INFO, "Connected to  %s\n",
+      debug(DEBUG_INFO, "Connected to %s\n",
             inet_ntop(AF_INET6, &me.sin6_addr, v6buf, INET6_ADDRSTRLEN));
       numClients++;
 
@@ -425,7 +424,7 @@ static int process_request(struct connection* cxn) {
       env->query = tmp;
       return process_json(cxn);
    }
-   
+
    if (stat(request->filepath, &stats)) {
       debug(DEBUG_INFO, "File not found... generating 404\n");
       return error_response(response, RESPONSE_NOT_FOUND);
@@ -657,7 +656,7 @@ static int json_response(struct response* response, enum JSON_CMD cmd) {
 static int error_response(struct response* response, enum RESPONSE_TYPE type) {
    char buf[BUF_LEN];
    int bytesWritten = 0;
-   
+
    switch(type) {
    case RESPONSE_BAD_REQUEST:
    case RESPONSE_METHOD_NOT_ALLOWED:
@@ -913,7 +912,7 @@ static int make_request_header(struct request* request) {
    }
    url_decode(tmp);
    snprintf(request->filepath, NAME_BUF_LEN, "docs%s", tmp);
-   return 0;   
+   return 0;
 }
 
 static inline const char* bool_to_string(bool b) {
