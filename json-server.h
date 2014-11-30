@@ -9,20 +9,19 @@
 #define DEBUG_INFO 2            //display info messages as well
 
 
-///return codes///
-#define UNSUPPORTED_OPERATION  -1
-#define STRUCT_SIZE_CHANGE     -2
-#define STRUCT_NOT_FOUND       -3
-#define NOT_ALLOWED            -4
-#define BUFFER_OVERFLOW        -5
-#define FDARR_MODIFIED         -6
-#define CGI_QUIT               -7
-#define BAD_SOCKET             -8
-#define POSIX_ERROR            -9
-#define INTERNAL_RESPONSE      -10
-#define BAD_REQUEST            -12
-#define FILE_NOT_FOUND         -13
-#define HTTP_CGI               -14
+///error codes///
+#define STRUCT_SIZE_CHANGE     -1
+#define STRUCT_NOT_FOUND       -2
+#define NOT_ALLOWED            -3
+#define BUFFER_OVERFLOW        -4
+#define FDARR_MODIFIED         -5
+#define CGI_QUIT               -6
+#define BAD_SOCKET             -7
+#define POSIX_ERROR            -8
+#define INTERNAL_RESPONSE      -9
+#define BAD_REQUEST            -10
+#define FILE_NOT_FOUND         -11
+#define HTTP_CGI               -12
 
 
 ///limitations///
@@ -47,6 +46,7 @@
 #define LEN_CGI 4
 #define LEN_CGI_BIN (strlen("/cgi-bin/"))
 #define LEN_JSON (strlen("/json/"))
+
 #define BODY_LISTING_BEGIN "<HTML>\n<HEAD>\n<TITLE>Directory Listing</TITLE>\n" \
    "</HEAD>\n<BODY>\n<H2>Directory Listing</H2><BR>\n<UL>\n"
 #define BODY_LISTING_END "</UL>\n</BODY>\n</HTML>\n"
@@ -178,11 +178,11 @@ struct connection {
 
 
 ///function prototypes///
-static int error_response(struct response* response);
-static int make_response_header(struct response* response);
 static int make_request_header(struct request* request);
+static int make_response_header(struct response* response);
 static int cgi_response(struct response* response, enum CGI_CMD cmd);
 static int json_response(struct response* response, enum JSON_CMD cmd);
+static int error_response(struct response* response, enum RESPONSE_TYPE type);
 static int generate_listing(char* filepath, struct response* response);
 static int cgi_request(struct env* env, enum CGI_CMD* cmd);
 static int fdarr_cntl(enum FDARR_CMD cmd, ...);
