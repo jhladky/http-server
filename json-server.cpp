@@ -54,6 +54,8 @@ int main(int argc, char* argv[]) {
 
    set_debug_level(DEBUG_INFO);
    //set_debug_level(DEBUG_NONE);
+   debug(DEBUG_INFO, "Server Starting...\n");
+   
    add_handler(SIGINT, clean_exit);
    add_handler(SIGCHLD, wait_cgi);
 
@@ -199,64 +201,6 @@ static int process_mysock_events(int socket, short revents) {
    return err;
 }
 
-static int request_state_zero_read(struct connection* cxn) {
-   debug(DEBUG_INFO, "Zero read, closing connection\n");
-   close_connection(cxn);
-   return FDARR_MODIFIED;
-}
-
-static int request_state_error(struct connection* cxn) {
-   debug(DEBUG_WARNING, "Error processing request...sending 500!\n");
-   cxn->state = ST_INTERNAL;
-   error_response(&cxn->response, RESPONSE_INTERNAL_ERROR);
-   return 0;
-}
-
-static int request_state_incomplete(struct connection* cxn) {
-   // do nothing!
-   return 0;
-}
-
-static int request_state_finished(struct connection* cxn) {
-   int res, err = 0;
-   char* ptr;
-
-   numRequests++;
-   res = process_request(cxn);
-
-   if (res == HTTP_CGI) {
-      cxn->cgi = true;
-      cxn->state = ST_INTERNAL;
-   } else if (res == CGI_QUIT) {
-      cxn->quit = true;
-      cxn->state = ST_INTERNAL;
-   } else if (res == INTERNAL_RESPONSE) {
-      cxn->state = ST_INTERNAL;
-   } else {
-      cxn->fileBuf = (char *) mmap(NULL, cxn->response.contentLength,
-                                   PROT_READ, MAP_PRIVATE, cxn->file, 0);
-      if ((intptr_t) cxn->fileBuf == -1) {
-         cxn->state = ST_INTERNAL;
-         debug(DEBUG_WARNING, "mmap: %s\n", strerror(errno));
-         close(cxn->file);
-         error_response(&cxn->response, RESPONSE_INTERNAL_ERROR);
-      } else {
-         cxn->state = ST_RESPONSE_HEA;
-         fdarr_cntl(FDARR_ADD, cxn->file, POLLIN);
-         err = FDARR_MODIFIED;
-         connections->insert(std::make_pair(cxn->file, cxn));
-         debug(DEBUG_INFO, "Adding fd to struct, #%d\n", cxn->file);
-         ptr = strchr(cxn->request.filepath, '.');
-         if (ext2mime->count(std::string(ptr + 1))) {
-            cxn->response.contentType =
-               ext2mime->at(std::string(ptr +1)).c_str();
-         }
-
-         make_response_header(&cxn->response);
-      }
-   }
-   return err;
-}
 
 static int process_cxsock_events(struct connection* cxn, short revents) {
    static int (*frbActions[NUM_REQUEST_STATES])(struct connection *) = {
@@ -292,9 +236,7 @@ static int process_cxsock_events(struct connection* cxn, short revents) {
       debug(DEBUG_INFO, "cxsock, revent: POLLOUT, state: RESPONSE_INP\n");
       ptr = cxn->fileBuf + cxn->response.contentLength -
          cxn->response.bytesToWrite;
-      res = write(cxn->socket,
-                  ptr,
-                  cxn->response.bytesToWrite);
+      res = write(cxn->socket, ptr, cxn->response.bytesToWrite);
 
       if (res == -1) {
          cxn->state = ST_RESPONSE_FIN;
@@ -346,6 +288,66 @@ static int process_cxfile_events(struct connection* cxn, short revents) {
    }
 
    return err;
+}
+
+static int request_state_zero_read(struct connection* cxn) {
+   debug(DEBUG_INFO, "Zero read, closing connection\n");
+   close_connection(cxn);
+   return FDARR_MODIFIED;
+}
+
+static int request_state_error(struct connection* cxn) {
+   debug(DEBUG_WARNING, "Error processing request...sending 500!\n");
+   cxn->state = ST_INTERNAL;
+   error_response(&cxn->response, RESPONSE_INTERNAL_ERROR);
+   return 0;
+}
+
+static int request_state_incomplete(struct connection* cxn) {
+   // do nothing!
+   return 0;
+}
+
+static int request_state_finished(struct connection* cxn) {
+   char* ptr;
+
+   numRequests++;
+   switch(process_request(cxn)) {
+   case HTTP_CGI:
+      cxn->cgi = true;
+      cxn->state = ST_INTERNAL;
+      return 0;
+   case QUIT:
+      cxn->quit = true;
+      cxn->state = ST_INTERNAL;
+      return 0;
+   case INTERNAL_RESPONSE:
+      cxn->state = ST_INTERNAL;
+      return 0;
+   }
+
+   cxn->fileBuf = (char *) mmap(NULL, cxn->response.contentLength,
+                                PROT_READ, MAP_PRIVATE, cxn->file, 0);
+   if ((intptr_t) cxn->fileBuf == -1) {
+      debug(DEBUG_WARNING, "mmap: %s\n", strerror(errno));
+      cxn->state = ST_INTERNAL;
+      close(cxn->file);
+      error_response(&cxn->response, RESPONSE_INTERNAL_ERROR);
+      return 0;
+   } else {
+      cxn->state = ST_RESPONSE_HEA;
+      fdarr_cntl(FDARR_ADD, cxn->file, POLLIN);
+      connections->insert(std::make_pair(cxn->file, cxn));
+      debug(DEBUG_INFO, "Adding fd to struct, #%d\n", cxn->file);
+      ptr = strrchr(cxn->request.filepath, '.');
+      if (ptr && ext2mime->count(std::string(ptr + 1))) {
+         cxn->response.contentType =
+            ext2mime->at(std::string(ptr +1)).c_str();
+      }
+
+      make_response_header(&cxn->response);
+      return FDARR_MODIFIED;
+   }
 }
 
 static int process_cgi(struct connection* cxn) {
@@ -408,13 +410,15 @@ static int process_request(struct connection* cxn) {
     * different types of HTTP responses, 405, 500, and 400, respectively
     * but we're combining them into a 500 right now.
     */
-   if (res == NOT_ALLOWED || res == BUFFER_OVERFLOW || res == BAD_REQUEST) {
-      return error_response(response, RESPONSE_INTERNAL_ERROR);
+   switch (res) {
+   case NOT_ALLOWED: return error_response(response, RESPONSE_METHOD_NOT_ALLOWED);
+   case BUFFER_OVERFLOW: return error_response(response, RESPONSE_INTERNAL_ERROR);
+   case BAD_REQUEST:return error_response(response, RESPONSE_BAD_REQUEST);
    }
 
    if ((strstr(tmp, "/cgi-bin/"))) { //check for cgi
       debug(DEBUG_INFO, "cgi request: %s\n", tmp);
-      env->method = "GET"; //FIX THIS SOME TIME IN THE FUTURE...
+      env->method = "GET"; // fix....
       env->query = tmp;
       return process_cgi(cxn);
    }
@@ -425,38 +429,46 @@ static int process_request(struct connection* cxn) {
       return process_json(cxn);
    }
 
-   if (stat(request->filepath, &stats)) {
-      debug(DEBUG_INFO, "File not found... generating 404\n");
-      return error_response(response, RESPONSE_NOT_FOUND);
+   if (stat(request->filepath, &stats) == -1) {
+      switch (errno) {
+      case ENOENT: return error_response(response, RESPONSE_NOT_FOUND);
+      case EACCES: return error_response(response, RESPONSE_FORBIDDEN);
+      default:
+         debug(DEBUG_WARNING, "stat: %s\n", strerror(errno));
+         return error_response(response, RESPONSE_INTERNAL_ERROR);
+      }
    }
 
    if (S_ISDIR(stats.st_mode)) {
+      debug(DEBUG_INFO, "Is a directory.\n");
       if (request->filepath[strlen(request->filepath) - 1] != '/') {
          strcat(request->filepath, "/");
       }
       strcat(request->filepath, "index.html");
 
-      //maybe change this to an access() call
-      if (stat(request->filepath, &stats)) {
-         debug(DEBUG_INFO, "Generating directory listing\n");
-         if (generate_listing(request->filepath, response)) {
-            debug(DEBUG_WARNING, "Generate listing error\n");
+      if (stat(request->filepath, &stats) == -1) {
+         switch (errno) {
+         case ENOENT:
+            debug(DEBUG_INFO, "Generating directory listing.\n");
+            return generate_listing(request->filepath, response);
+         default:
+            debug(DEBUG_WARNING, "stat: %s\n", strerror(errno));
             return error_response(response, RESPONSE_INTERNAL_ERROR);
          }
-         return INTERNAL_RESPONSE;
       }
    }
 
-   response->contentLength = request->contentLength = stats.st_size;
-
-   res = open(request->filepath, O_RDONLY | O_NONBLOCK);
-   if (res == -1 && errno == EACCES) {
-      return error_response(response, RESPONSE_FORBIDDEN);
-   } else if (res == -1) {
-      debug(DEBUG_WARNING, "popen: %s\n", strerror(errno));
-      return error_response(response, RESPONSE_INTERNAL_ERROR);
+   response->contentLength = stats.st_size;
+   if ((res = open(request->filepath, O_RDONLY | O_NONBLOCK)) == -1) {
+      switch (errno) {
+      case EACCES: return error_response(response, RESPONSE_FORBIDDEN);
+      default:
+         debug(DEBUG_WARNING, "popen: %s\n", strerror(errno));
+         return error_response(response, RESPONSE_INTERNAL_ERROR);
+      }
    }
 
+   //debug(DEBUG_WARNING, "Content-Length is %d\n", response->contentLength);
    cxn->file = res;
    return 0;
 }
@@ -467,23 +479,30 @@ static void reset_connection(struct connection* cxn) {
 
    debug(DEBUG_INFO, "Resetting connection\n");
    env = cxn->env;
-   connections->erase(cxn->file);
+   /* 
+    * If there was an entry for the file in the file descriptor table, then
+    * it is also open and in other data structures, so remove it from them.
+    * If it was not in the table then erase will simply return 0. A file
+    * descriptor may not be set in the connection because we might have done
+    * an internal response such as a 404 in response to the request, instead of
+    * sending a file.
+    */
+   if (connections->erase(cxn->file)) {
+      fdarr_cntl(FDARR_REMOVE, cxn->file);
+      close(cxn->file);
+   }
    munmap(cxn->fileBuf, cxn->response.contentLength);
-   fdarr_cntl(FDARR_REMOVE, cxn->file);
-   close(cxn->file);
    memset(cxn, 0, sizeof(struct connection));
    cxn->socket = socket;
    cxn->env = env;
-   cxn->response.type = RESPONSE_OK;
 }
 
 static void close_connection(struct connection* cxn) {
    debug(DEBUG_INFO, "Closing connection...\n");
 
    fdarr_cntl(FDARR_REMOVE, cxn->socket);
-   if (cxn->file) {
+   if (connections->erase(cxn->file)) {
       fdarr_cntl(FDARR_REMOVE, cxn->file);
-      connections->erase(cxn->file);
       close(cxn->file);
    }
    close(cxn->socket);
@@ -522,7 +541,7 @@ static enum REQUEST_STATE fill_request_buffer(int socket, char* buffer, unsigned
 static int fdarr_cntl(enum FDARR_CMD cmd, ...) {
    static struct pollfd* fds = NULL;
    static nfds_t nfds = 0;
-   static unsigned int fdarrMaxSize = 50;
+   static unsigned int fdarrMaxSize = FDARR_INIT_LEN / 2;
    struct pollfd** fdsFill;
    nfds_t* nfdsFill;
    unsigned int i;
@@ -540,7 +559,7 @@ static int fdarr_cntl(enum FDARR_CMD cmd, ...) {
          debug(DEBUG_WARNING, "Allocating pollfd array failed\n");
          return POSIX_ERROR;
       }
-      err = STRUCT_SIZE_CHANGE;
+      err = SIZE_CHANGE;
    }
 
    switch(cmd) {
@@ -649,7 +668,7 @@ static int json_response(struct response* response, enum JSON_CMD cmd) {
    make_response_header(response);
    memcpy(response->buffer + response->headerLength, buf, bytesWritten);
    response->bytesUsed += bytesWritten;
-   return cmd == JSON_QUIT ? CGI_QUIT : INTERNAL_RESPONSE;
+   return cmd == JSON_QUIT ? QUIT : INTERNAL_RESPONSE;
 }
 
 //an error response is a response that's not the normal HTTP 200 OK
@@ -659,18 +678,24 @@ static int error_response(struct response* response, enum RESPONSE_TYPE type) {
 
    switch(type) {
    case RESPONSE_BAD_REQUEST:
-   case RESPONSE_METHOD_NOT_ALLOWED:
-   case RESPONSE_NOT_FOUND:
-      debug(DEBUG_INFO, "Sending error 404 Not Found\n");
-      bytesWritten = sprintf(buf, "%s", BODY_404);
+      debug(DEBUG_INFO, "Sending 400 Bad Request\n");
+      bytesWritten = sprintf(buf, "%s", BODY_400);
       break;
    case RESPONSE_FORBIDDEN:
-      debug(DEBUG_INFO, "Sending error 403 Forbidden\n");
+      debug(DEBUG_INFO, "Sending 403 Forbidden\n");
       bytesWritten = sprintf(buf, "%s", BODY_403);
+      break;
+   case RESPONSE_NOT_FOUND:
+      debug(DEBUG_INFO, "Sending 404 Not Found\n");
+      bytesWritten = sprintf(buf, "%s", BODY_404);
+      break;
+   case RESPONSE_METHOD_NOT_ALLOWED:
+      debug(DEBUG_INFO, "Sending 405 Method Not Allowed\n");
+      bytesWritten = sprintf(buf, "%s", BODY_405);
       break;
    default:
    case RESPONSE_INTERNAL_ERROR:
-      debug(DEBUG_WARNING, "Sending error 500 Internal\n");
+      debug(DEBUG_WARNING, "Sending 500 Internal\n");
       bytesWritten = sprintf(buf, "%s", BODY_500);
       break;
    }
@@ -722,7 +747,7 @@ static int cgi_response(struct response* response, enum CGI_CMD cmd) {
    make_response_header(response);
    memcpy(response->buffer + response->headerLength, buf, bytesWritten);
    response->bytesUsed += bytesWritten;
-   return cmd == CGI_GOODBYE ? CGI_QUIT : INTERNAL_RESPONSE;
+   return cmd == CGI_GOODBYE ? QUIT : INTERNAL_RESPONSE;
 }
 
 //overloaded initally
@@ -741,21 +766,21 @@ static int make_response_header(struct response* response) {
                       responseType2String[response->type]);
 
    if (response->contentType) {
-      written += sprintf(response->buffer + written,
-                         "Content-Type: %s\r\n", response->contentType);
+      written += snprintf(response->buffer + written, BUF_LEN - written,
+                          "Content-Type: %s\r\n", response->contentType);
    }
 
    if (response->keepAlive) {
-      written += sprintf(response->buffer + written,
-                         "Connection: Keep-Alive\r\n");
+      written += snprintf(response->buffer + written, BUF_LEN - written,
+                          "Connection: Keep-Alive\r\n");
    }
 
    if (response->usingDeflate) {
-      written += sprintf(response->buffer + written,
-                         "Content-Encoding: deflate\r\n");
+      written += snprintf(response->buffer + written, BUF_LEN - written,
+                          "Content-Encoding: deflate\r\n");
    } else {
-      written += sprintf(response->buffer + written,
-                         "Content-Length: %d\r\n\r\n", response->contentLength);
+      written += snprintf(response->buffer + written, BUF_LEN - written,
+                          "Content-Length: %d\r\n\r\n", response->contentLength);
    }
    response->bytesUsed = response->headerLength = written;
    response->bytesToWrite = response->headerLength + response->contentLength;
@@ -773,7 +798,7 @@ static int generate_listing(char* filepath, struct response* response) {
 
    if (str == NULL) {
       debug(DEBUG_WARNING, "Allocating filepath copy failed\n");
-      return POSIX_ERROR;
+      return error_response(response, RESPONSE_INTERNAL_ERROR);
    }
 
    memcpy(str, filepath + LEN_DOCS, strlen(filepath) - LEN_DOCS + 1);
@@ -787,11 +812,11 @@ static int generate_listing(char* filepath, struct response* response) {
 
    buf = (char *) calloc(1, AVG_LISTING_LEN * numDirEntries);
    if (buf == NULL) {
-      debug(DEBUG_WARNING, "Allocating generate listing buffer failed\n");
+      debug(DEBUG_WARNING, "Allocating generate listing buffer failed.\n");
       free(str);
-      return POSIX_ERROR;
+      return error_response(response, RESPONSE_INTERNAL_ERROR);
    }
-   //bufLen = AVG_LISTING_LEN * numDirEntries;
+   //bufLen = AVG_LISTING_LEN * numDirEntries; //why is this commented out??
 
    bytesWritten = sprintf(buf, "%s", BODY_LISTING_BEGIN);
    parent = opendir(filepath);
@@ -817,7 +842,7 @@ static int generate_listing(char* filepath, struct response* response) {
 
    free(str);
    free(buf);
-   return 0;
+   return INTERNAL_RESPONSE;
 }
 
 //parse the request declaration
@@ -935,12 +960,11 @@ static char* request_declaration_to_string(const struct request* request) {
 //make this into a to_string method some time in the future
 static void print_request(struct request* request) {
    debug(DEBUG_INFO, "Request: %s\n", request_declaration_to_string(request));
-   debug(DEBUG_INFO, "|-HTTP content length: %dB\n", request->contentLength);
    debug(DEBUG_INFO, "|-HTTP-Option Referrer: %s\n", request->referer);
    debug(DEBUG_INFO, "|-HTTP-Option User-Agent: %s\n", request->userAgent);
-   debug(DEBUG_INFO, "|-HTTP-Option Keep-Alive?: %s\n",
+   debug(DEBUG_INFO, "|-HTTP-Option `Connection: Keep-Alive`?: %s\n",
          bool_to_string(request->keepAlive));
-   debug(DEBUG_INFO, "|-HTTP-Option Accept-Encoding: deflate?: %s\n",
+   debug(DEBUG_INFO, "|-HTTP-Option `Accept-Encoding: deflate`?: %s\n",
          bool_to_string(request->keepAlive));
 }
 

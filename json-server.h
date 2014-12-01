@@ -10,12 +10,12 @@
 
 
 ///error codes///
-#define STRUCT_SIZE_CHANGE     -1
+#define SIZE_CHANGE            -1
 #define STRUCT_NOT_FOUND       -2
 #define NOT_ALLOWED            -3
 #define BUFFER_OVERFLOW        -4
 #define FDARR_MODIFIED         -5
-#define CGI_QUIT               -6
+#define QUIT                   -6
 #define BAD_SOCKET             -7
 #define POSIX_ERROR            -8
 #define INTERNAL_RESPONSE      -9
@@ -28,8 +28,9 @@
 #define BUF_LEN 1024
 #define NAME_BUF_LEN 64
 #define ENV_BUF_LEN 64
-#define MAX_TOKS 100
 #define AVG_LISTING_LEN 100
+#define MAX_TOKS 100
+#define FDARR_INIT_LEN 100
 #define NUM_ENV_VARS 8
 #define NUM_DEBUG_LEVELS 3
 #define NUM_HTTP_REQUEST_TYPES 4
@@ -47,29 +48,50 @@
 #define LEN_CGI_BIN (strlen("/cgi-bin/"))
 #define LEN_JSON (strlen("/json/"))
 
+
+///http error messages//
 #define BODY_LISTING_BEGIN "<HTML>\n<HEAD>\n<TITLE>Directory Listing</TITLE>\n" \
    "</HEAD>\n<BODY>\n<H2>Directory Listing</H2><BR>\n<UL>\n"
 #define BODY_LISTING_END "</UL>\n</BODY>\n</HTML>\n"
-#define BODY_STATUS_BEGIN "<HTML>\n<HEAD>\n<TITLE>Server Status</TITLE>\n"      \
+#define BODY_STATUS_BEGIN "<HTML>\n<HEAD>\n<TITLE>Server Status</TITLE>\n" \
    "</HEAD>\n<BODY>\nAuthor: Jacob Hladky<BR>\n"
-#define BODY_STATUS_END "<BR>\n<FORM METHOD=\"GET\" ACTION=\"quit\">\n<INPUT "  \
-   "TYPE=\"submit\" VALUE=\"Quit Server\"/>\n<INPUT TYPE=\"HIDDEN\" NAME=\""    \
+#define BODY_STATUS_END "<BR>\n<FORM METHOD=\"GET\" ACTION=\"quit\">\n<INPUT " \
+   "TYPE=\"submit\" VALUE=\"Quit Server\"/>\n<INPUT TYPE=\"HIDDEN\" NAME=\"" \
    "confirm\" VALUE=\"1\"/>\n</FORM>\n</BODY>\n</HTML>\n"
+#define BODY_400 "<HTML><HEAD><TITLE>400 Bad Request</TITLE></HEAD><BODY>" \
+   "<H1>Bad Request</H1>The request could not be understood by this"    \
+   "server.</BODY></HTML>"
 #define BODY_403 "<HTML><HEAD><TITLE>HTTP ERROR 403</TITLE></HEAD><BODY>" \
    "403 Forbidden.  Your request could not be completed due to "          \
    "encountering HTTP error number 403.</BODY></HTML>"
 #define BODY_404 "<HTML><HEAD><TITLE>HTTP ERROR 404</TITLE></HEAD><BODY>" \
    "404 Not Found.  Your request could not be completed due to "          \
    "encountering HTTP error number 404.</BODY></HTML>"
+#define BODY_405 "<HTML><HEAD><TITLE>405 Method Not Allowed</TITLE>" \
+   "</HEAD><BODY><H1>Method Not Allowed</H1>The method is not "      \
+   "allowed for the requested url.</BODY></HTML>"
 #define BODY_500 "<HTML><HEAD><TITLE>HTTP ERROR 500</TITLE></HEAD><BODY>" \
    "500 Internal Server Error.  Your request could not be completed due " \
    "to encountering HTTP error number 500.</BODY></HTML>"
-#define BODY_JSON_ABOUT "{\n\"author\":\"Jacob Hladky\", \"email\":\"jhladky@calpoly.edu\", \"major\": \"CPE\"}"
+
+
+///json messages///
+#define BODY_JSON_ABOUT "{\n\"author\":\"Jacob Hladky\", "  \
+   "\"email\":\"jhladky@calpoly.edu\", \"major\": \"CPE\"}"
 #define BODY_JSON_QUIT "{\n\"result\":\"success\"\n}"
 //IMPLEMENTED_1 is a limited version is the full feature set
-#define BODY_JSON_IMPLEMENTED_1 "[\n{ \"feature\": \"about\", \"URL\": \"/json/about.json\"},{ \"feature\": \"quit\", \"URL\": \"/json/quit\"},{ \"feature\": \"status\", \"URL\": \"/json/status.json\"}]"
-#define BODY_JSON_IMPLEMENTED "[\n{ \"feature\": \"about\", \"URL\": \"/json/about.json\"},{ \"feature\": \"quit\", \"URL\": \"/json/quit\"},{ \"feature\": \"status\", \"URL\": \"/json/status.json\"},{ \"feature\": \"fortune\", \"URL\": \"/json/fortune.json\"}]"
-#define BODY_JSON_STATUS "{\n\"num_clients\": %d, \"num_requests\": %d, \"errors\": %d, \"uptime\": %lf, \"cpu_time\": %lf, \"memory_used\": %ld\n}"
+#define BODY_JSON_IMPLEMENTED_1 "[\n{ \"feature\": \"about\", "   \
+   "\"URL\": \"/json/about.json\"},{ \"feature\": \"quit\", "     \
+   "\"URL\": \"/json/quit\"},{ \"feature\": \"status\", "         \
+   "\"URL\": \"/json/status.json\"}]"
+#define BODY_JSON_IMPLEMENTED "[\n{ \"feature\": \"about\", "     \
+   "\"URL\": \"/json/about.json\"},{ \"feature\": \"quit\", "     \
+   "\"URL\": \"/json/quit\"},{ \"feature\": \"status\", "         \
+   "\"URL\": \"/json/status.json\"},{ \"feature\": \"fortune\", " \
+   "\"URL\": \"/json/fortune.json\"}]"
+#define BODY_JSON_STATUS "{\n\"num_clients\": %d, \"num_requests\": %d, " \
+   "\"errors\": %d, \"uptime\": %lf, \"cpu_time\": %lf, "                 \
+   "\"memory_used\": %ld\n}"
 
 ///structs, unions, and enums///
 enum CGI_CMD {
@@ -133,9 +155,8 @@ struct request {
    enum REQUEST_STATE state;
    enum REQUEST_TYPE type;      //this and the two below come from the request declaration
    int httpVersion;             //-1 for HTTP/0.9, 0 for HTTP/1.0, 1 for HTTP/1.1
-   char filepath[NAME_BUF_LEN]; //we have our own buffer for this so we don't mess up the main buffer
+   char filepath[NAME_BUF_LEN]; //we have our own buffer for this so we don't mess up the main buffer 64B
    unsigned int bytesUsed;
-   unsigned int contentLength;
    const char* referer;         //these point to locations in buffer
    const char* userAgent;
    bool keepAlive;
