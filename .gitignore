@@ -28,6 +28,6 @@
 *.app
 
 # Binaries
-json-server-Darwin-x86_64
+json-server-*
 access.log
 error.log

@@ -52,10 +52,13 @@ int main(int argc, char* argv[]) {
    char v6buf[INET6_ADDRSTRLEN];
    socklen_t sockSize = sizeof(struct sockaddr_in6);
 
+#ifdef DEBUG
    set_debug_level(DEBUG_INFO);
-   //set_debug_level(DEBUG_NONE);
+#else
+   set_debug_level(DEBUG_NONE);
+#endif
    debug(DEBUG_INFO, "Server Starting...\n");
-   
+
    add_handler(SIGINT, clean_exit);
    add_handler(SIGCHLD, wait_cgi);
 
@@ -242,7 +245,8 @@ static int process_cxsock_events(struct connection* cxn, short revents) {
          cxn->state = ST_RESPONSE_FIN;
       } else {
          cxn->response.bytesToWrite -= res;
-         cxn->state = cxn->response.bytesToWrite ? ST_LOAD_FILE : ST_RESPONSE_FIN;
+         cxn->state =
+            cxn->response.bytesToWrite ? ST_LOAD_FILE : ST_RESPONSE_FIN;
       }
    } else if (revents & POLLOUT && cxn->state == ST_CGI_FIL) {
       if (do_cgi(&cxn->env) == POSIX_ERROR) {
@@ -367,7 +371,7 @@ static int process_cgi(struct connection* cxn) {
 
 static int process_json(struct connection* cxn) {
    enum JSON_CMD cmd;
-   char* str = cxn->env.query + LEN_JSON;
+   char* str = cxn->env.query + strlen("/json/");
 
    if (strcmp(cxn->env.query, "/json/") == 0) {
       return error_response(&cxn->response, RESPONSE_NOT_FOUND);
@@ -391,7 +395,7 @@ static int process_json(struct connection* cxn) {
 }
 
 static int process_request(struct connection* cxn) {
-   char* tmp = cxn->request.filepath + LEN_DOCS;
+   char* tmp = cxn->request.filepath + strlen("docs/");
    struct stat stats;
    struct env* env = &cxn->env;
    struct request* request = &cxn->request;
@@ -406,14 +410,13 @@ static int process_request(struct connection* cxn) {
    response->usingDeflate = false;
    response->keepAlive = request->keepAlive;
 
-   /* This is really three separate errors that should result in three separate
-    * different types of HTTP responses, 405, 500, and 400, respectively
-    * but we're combining them into a 500 right now.
-    */
    switch (res) {
-   case NOT_ALLOWED: return error_response(response, RESPONSE_METHOD_NOT_ALLOWED);
-   case BUFFER_OVERFLOW: return error_response(response, RESPONSE_INTERNAL_ERROR);
-   case BAD_REQUEST:return error_response(response, RESPONSE_BAD_REQUEST);
+   case NOT_ALLOWED:
+      return error_response(response, RESPONSE_METHOD_NOT_ALLOWED);
+   case BUFFER_OVERFLOW:
+      return error_response(response, RESPONSE_INTERNAL_ERROR);
+   case BAD_REQUEST:
+      return error_response(response, RESPONSE_BAD_REQUEST);
    }
 
    if ((strstr(tmp, "/cgi-bin/"))) { //check for cgi
@@ -479,7 +482,7 @@ static void reset_connection(struct connection* cxn) {
 
    debug(DEBUG_INFO, "Resetting connection\n");
    env = cxn->env;
-   /* 
+   /*
     * If there was an entry for the file in the file descriptor table, then
     * it is also open and in other data structures, so remove it from them.
     * If it was not in the table then erase will simply return 0. A file
@@ -511,10 +514,14 @@ static void close_connection(struct connection* cxn) {
    free(cxn);
 }
 
-static enum REQUEST_STATE fill_request_buffer(int socket, char* buffer, unsigned int* bytesUsed) {
+static enum REQUEST_STATE fill_request_buffer(int socket,
+                                              char* buffer,
+                                              unsigned int* bytesUsed) {
    int bytesRead = 0;
 
-   if ((bytesRead = read(socket, buffer + *bytesUsed, BUF_LEN - *bytesUsed)) == -1) {
+   if ((bytesRead = read(socket,
+                         buffer + *bytesUsed,
+                         BUF_LEN - *bytesUsed)) == -1) {
       debug(DEBUG_WARNING, "read: %s\n", strerror(errno));
       return ST_ERROR;
    } else if (bytesRead == 0) {
@@ -754,8 +761,8 @@ static int cgi_response(struct response* response, enum CGI_CMD cmd) {
 static int make_response_header(struct response* response) {
    static const char* responseType2String[NUM_HTTP_RESPONSE_TYPES] = {
       "200 OK",
-      "404 Not Found",
-      "404 Not Found",
+      "400 Bad Request",
+      "405 Method Not Allowed",
       "403 Forbidden",
       "404 Not Found",
       "500 Internal Server Error"
@@ -779,8 +786,10 @@ static int make_response_header(struct response* response) {
       written += snprintf(response->buffer + written, BUF_LEN - written,
                           "Content-Encoding: deflate\r\n");
    } else {
-      written += snprintf(response->buffer + written, BUF_LEN - written,
-                          "Content-Length: %d\r\n\r\n", response->contentLength);
+      written += snprintf(response->buffer + written,
+                          BUF_LEN - written,
+                          "Content-Length: %d\r\n\r\n",
+                          response->contentLength);
    }
    response->bytesUsed = response->headerLength = written;
    response->bytesToWrite = response->headerLength + response->contentLength;
@@ -791,7 +800,7 @@ static int generate_listing(char* filepath, struct response* response) {
    char* buf;
    int bytesWritten = 0, numDirEntries = 0;
    DIR* parent;
-   char* str = (char *) calloc(1, strlen(filepath) - LEN_DOCS + 1);
+   char* str = (char *) calloc(1, strlen(filepath) - strlen("docs/") + 1);
    struct dirent* entry;
 
    debug(DEBUG_INFO, "In generate_listing\n");
@@ -801,7 +810,8 @@ static int generate_listing(char* filepath, struct response* response) {
       return error_response(response, RESPONSE_INTERNAL_ERROR);
    }
 
-   memcpy(str, filepath + LEN_DOCS, strlen(filepath) - LEN_DOCS + 1);
+   memcpy(str, filepath + strlen("docs/"),
+          strlen(filepath) - strlen("docs/") + 1);
    *(strstr(str, "/index.html")) = '\0';
    *(strstr(filepath, "/index.html")) = '\0';
    parent = opendir(filepath);
@@ -895,7 +905,10 @@ static int make_request_header(struct request* request) {
    int i, numToks, res;
 
    //find the end of the first line of the request
-   if ((lineEnd = (char * ) memmem(request->buffer, request->bytesUsed, "\r\n", 2)) == NULL) {
+   if ((lineEnd = (char * ) memmem(request->buffer,
+                                   request->bytesUsed,
+                                   "\r\n",
+                                   2)) == NULL) {
       debug(DEBUG_WARNING, "Can't find HTTP request declaration\n");
       return BAD_REQUEST; //should result in a 400
    }
@@ -952,7 +965,7 @@ static char* request_declaration_to_string(const struct request* request) {
 
    snprintf(str, NAME_BUF_LEN, "%s %s HTTP/%.1lf",
             type2String[request->type],
-            request->filepath + LEN_DOCS,
+            request->filepath + strlen("docs/"),
             request->httpVersion / 10.0 + 1.0);
    return str;
 }
@@ -1032,13 +1045,13 @@ static int cgi_request(struct env* env, enum CGI_CMD* cmd) {
    int len, i;
    bool hasParams = false;
 
-   if (strstr(env->query + LEN_CGI_BIN, "quit")) {
+   if (strstr(env->query + strlen("/cgi-bin/"), "quit")) {
       *cmd = strcmp(env->query + strlen("/cgi-bin/quit"), "?confirm=1") ?
          CGI_BADPARAMS : CGI_GOODBYE;
       return 0;
    }
 
-   if (strcmp(env->query + LEN_CGI_BIN, "status") == 0) {
+   if (strcmp(env->query + strlen("/cgi-bin/"), "status") == 0) {
       debug(DEBUG_INFO, "cgi status requested\n");
       *cmd = CGI_STATUS;
       return 0;
@@ -1048,21 +1061,23 @@ static int cgi_request(struct env* env, enum CGI_CMD* cmd) {
       return FILE_NOT_FOUND;
    }
 
-   len = strlen(env->query) - LEN_CGI_BIN;
+   len = strlen(env->query) - strlen("/cgi-bin/");
    if ((pathEnd = strchr(env->query, '?'))) {
-      len -= (len - (pathEnd - (env->query + LEN_CGI_BIN)));
+      len -= (len - (pathEnd - (env->query + strlen("/cgi-bin/"))));
       hasParams = true;
    }
 
-   env->filepath = (char *) calloc(1, len + LEN_CGI + 1);
+   env->filepath = (char *) calloc(1, len + strlen("cgi/") + 1);
    if (env->filepath == NULL) {
       debug(DEBUG_WARNING, "Failed to allocate cgi filepath\n");
       return POSIX_ERROR;
    }
 
-   memcpy(env->filepath + LEN_CGI, env->query + LEN_CGI_BIN, len);
-   (env->filepath + LEN_CGI)[len] = '\0';
-   memcpy(env->filepath, "cgi/", LEN_CGI);
+   memcpy(env->filepath + strlen("cgi/"),
+          env->query + strlen("/cgi-bin/"),
+          len);
+   (env->filepath + strlen("cgi/"))[len] = '\0';
+   memcpy(env->filepath, "cgi/", strlen("cgi/"));
    debug(DEBUG_INFO, "cgi filepath: %s\n", env->filepath);
 
    if (access(env->filepath, X_OK)) {
@@ -1094,7 +1109,7 @@ static int cgi_request(struct env* env, enum CGI_CMD* cmd) {
 
    strcpy(env->envvars[0], "GATEWAY_INTERFACE=CGI/1.1");
    snprintf(env->envvars[1], ENV_BUF_LEN, "QUERY_STRING=%s",
-            hasParams ? env->query + LEN_CGI_BIN + len + 1 : "");
+            hasParams ? env->query + strlen("/cgi-bin/") + len + 1 : "");
 
    snprintf(env->envvars[2], ENV_BUF_LEN, "REMOTE_ADDR=[%s]",
             inet_ntop(AF_INET6, &me.sin6_addr, v6buf, INET6_ADDRSTRLEN));
@@ -1103,7 +1118,7 @@ static int cgi_request(struct env* env, enum CGI_CMD* cmd) {
             env->method);
 
    snprintf(env->envvars[4], ENV_BUF_LEN, "SCRIPT_NAME=/cgi-bin/%s",
-            env->filepath + LEN_CGI);
+            env->filepath + strlen("cgi/"));
 
    snprintf(env->envvars[5], ENV_BUF_LEN, "SERVER_NAME=[%s]",
             inet_ntop(AF_INET6, &server.sin6_addr, v6buf, INET6_ADDRSTRLEN));

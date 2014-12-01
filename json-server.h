@@ -39,19 +39,9 @@
 #define NUM_REQ_DECL_PARTS 3
 
 
-///all other defines///
-#define DEBUG_SET 0xAAAAAAAA
-#define USEC_PER_SEC 100000.0
-#define LEN_INDEX_HTML 10
-#define LEN_DOCS 4
-#define LEN_CGI 4
-#define LEN_CGI_BIN (strlen("/cgi-bin/"))
-#define LEN_JSON (strlen("/json/"))
-
-
 ///http error messages//
-#define BODY_LISTING_BEGIN "<HTML>\n<HEAD>\n<TITLE>Directory Listing</TITLE>\n" \
-   "</HEAD>\n<BODY>\n<H2>Directory Listing</H2><BR>\n<UL>\n"
+#define BODY_LISTING_BEGIN "<HTML>\n<HEAD>\n<TITLE>Directory Listing"   \
+   "</TITLE>\n</HEAD>\n<BODY>\n<H2>Directory Listing</H2><BR>\n<UL>\n"
 #define BODY_LISTING_END "</UL>\n</BODY>\n</HTML>\n"
 #define BODY_STATUS_BEGIN "<HTML>\n<HEAD>\n<TITLE>Server Status</TITLE>\n" \
    "</HEAD>\n<BODY>\nAuthor: Jacob Hladky<BR>\n"
@@ -92,6 +82,12 @@
 #define BODY_JSON_STATUS "{\n\"num_clients\": %d, \"num_requests\": %d, " \
    "\"errors\": %d, \"uptime\": %lf, \"cpu_time\": %lf, "                 \
    "\"memory_used\": %ld\n}"
+
+
+///all other defines///
+#define DEBUG_SET 0xAAAAAAAA
+#define USEC_PER_SEC 100000.0
+
 
 ///structs, unions, and enums///
 enum CGI_CMD {
@@ -224,8 +220,10 @@ static void add_handler(int signal, void (*handlerFunc)(int));
 static void log_access(struct connection* cxn);
 static void url_decode(char* url);
 static void debug(uint32_t debug, const char* msg, ...);
-static char* request_declaration_to_string(const struct request* request); //fix the name on this
-static enum REQUEST_STATE fill_request_buffer(int socket, char* buffer, unsigned int* bytesUsed);
+static char* request_declaration_to_string(const struct request* request);
+static enum REQUEST_STATE fill_request_buffer(int socket,
+                                              char* buffer,
+                                              unsigned int* bytesUsed);
 static inline const char* bool_to_string(bool b);
 static inline void set_debug_level(uintptr_t debugLevel);
 static inline void pexit(const char* str);

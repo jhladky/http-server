@@ -33,6 +33,9 @@ else
 	ARCHFLAGS=
 endif
 
+json-server-$(EXEC_SUFFIX)-debug: json-server.cpp smartalloc-$(EXEC_SUFFIX).o
+	$(CPP) $(CPPFLAGS) -DDEBUG $(OSINC) $(OSLIB) $(OSFLAGS) $(ARCHFLAGS) $< smartalloc-$(EXEC_SUFFIX).o -o $@
+
 json-server-$(EXEC_SUFFIX): json-server.cpp smartalloc-$(EXEC_SUFFIX).o 
 	$(CPP) $(CPPFLAGS) $(OSINC) $(OSLIB) $(OSFLAGS) $(ARCHFLAGS) $< smartalloc-$(EXEC_SUFFIX).o -o $@
 
