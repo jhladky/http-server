@@ -26,6 +26,7 @@
 #include "smartalloc.h"
 #include "json-server.h"
 
+//lovin dat global data
 static connections_t* connections = new connections_t(500);
 static FILE* accessLog; //don't like this being global
 static ext_x_mime_t* ext2mime = new ext_x_mime_t({
@@ -38,11 +39,21 @@ static ext_x_mime_t* ext2mime = new ext_x_mime_t({
       {"pdf", "application/pdf"},
       {"json", "application/json"},
       {"txt", "text/plain"}});
-
-//lovin dat global data
-static int numClients = 0;
-static int numRequests = 0;
-static int errors = 0;
+static const char* responseType2String[NUM_HTTP_RESPONSE_TYPES] = {
+   "200 OK",
+   "400 Bad Request",
+   "405 Method Not Allowed",
+   "403 Forbidden",
+   "404 Not Found",
+   "500 Internal Server Error"
+};
+static const char* requestType2String[NUM_HTTP_REQUEST_TYPES] = {
+   "GET",
+   "PUT",
+   "POST",
+   "DELETE"
+};
+static int numClients = 0, numRequests = 0, errors = 0;
 static struct timeval startTime;
 
 
@@ -121,28 +132,37 @@ int main(int argc, char* argv[]) {
       struct pollfd* fds;
       nfds_t nfds;
       unsigned int i;
-      int res, fd;
+      int res, fd, revents;
 
       fdarr_cntl(FDARR_GET, &fds, &nfds);
+      debug(DEBUG_INFO, ">>> Calling poll\n");
       if ((res = poll(fds, nfds, -1)) == -1) {
          debug(DEBUG_WARNING, "Poll: %s\n", strerror(errno));
          continue; //not a fan of this
       }
 
+      debug(DEBUG_INFO, "<<< Returning from poll\n");
+      
       for (i = 0; i < nfds; i++) {
          fd = fds[i].fd;
+         revents = fds[i].revents;
 
          if (fd != mySock && connections->count(fd) == 0) {
             debug(DEBUG_ERROR, "Unrecognized fd(%d) in fdarr\n", fd);
             exit(EXIT_FAILURE);
          }
 
-         if (fd == mySock) {
-            res = process_mysock_events(mySock, fds[i].revents);
-         } else if (fd == connections->at(fd)->socket) {
-            res = process_cxsock_events(connections->at(fd), fds[i].revents);
-         } else if (fd == connections->at(fd)->file) {
-            res = process_cxfile_events(connections->at(fd), fds[i].revents);
+         if (revents && fd == mySock) {
+            debug(DEBUG_INFO, "* event on server socket\n");
+            res = process_mysock_events(mySock, revents);
+         } else if (revents && fd == connections->at(fd)->socket) {
+            debug(DEBUG_INFO, "* event on connection socket\n");
+            res = process_cxsock_events(connections->at(fd), revents);
+         } else if (revents && fd == connections->at(fd)->file) {
+            debug(DEBUG_INFO, "* event on file\n");
+            res = process_cxfile_events(connections->at(fd), revents);
+         } else if (revents) {
+            debug(DEBUG_INFO, "* unknown event!\n");
          }
 
          //if the fdarr was modified, break from the loop
@@ -195,10 +215,13 @@ static int process_mysock_events(int socket, short revents) {
             inet_ntop(AF_INET6, &me.sin6_addr, v6buf, INET6_ADDRSTRLEN));
       numClients++;
 
-      fdarr_cntl(FDARR_ADD, cxn->socket, POLLIN | POLLOUT);
+      // fdarr_cntl(FDARR_ADD, cxn->socket, POLLIN | POLLOUT);
+      fdarr_cntl(FDARR_ADD, cxn->socket, POLLIN);
       err = FDARR_MODIFIED;
       connections->insert(std::make_pair(cxn->socket, cxn));
       debug(DEBUG_INFO, "Allocated connection struct(%d)\n", cxn->socket);
+   } else {
+      debug(DEBUG_INFO, "mysock, revent: unknown, %08X, state: N/A\n", revents);
    }
 
    return err;
@@ -276,6 +299,8 @@ static int process_cxsock_events(struct connection* cxn, short revents) {
       debug(DEBUG_INFO, "cxsock, revent: POLLHUP/POLLERR/POLLNVAL\n");
       close_connection(cxn);
       err = FDARR_MODIFIED;
+   } else {
+      debug(DEBUG_INFO, "cxsock, revent: unknown, %08X, state: N/A\n", revents);
    }
 
    return err;
@@ -341,6 +366,7 @@ static int request_state_finished(struct connection* cxn) {
    } else {
       cxn->state = ST_RESPONSE_HEA;
       fdarr_cntl(FDARR_ADD, cxn->file, POLLIN);
+      fdarr_cntl(FDARR_MODIFY, cxn->socket, POLLIN | POLLOUT);
       connections->insert(std::make_pair(cxn->file, cxn));
       debug(DEBUG_INFO, "Adding fd to struct, #%d\n", cxn->file);
       ptr = strrchr(cxn->request.filepath, '.');
@@ -356,13 +382,13 @@ static int request_state_finished(struct connection* cxn) {
 
 static int process_cgi(struct connection* cxn) {
    struct response* response = &cxn->response;
-   enum CGI_CMD cmd;
+   enum CGI_CMD cmd = CGI_BADPARAMS; //initialize to default
+   enum RESPONSE_TYPE type;
 
-   //we're using the actual errno define here
-   switch(cgi_request(&cxn->env, &cmd)) {
-   case FILE_NOT_FOUND: return error_response(response, RESPONSE_NOT_FOUND);
-   case EACCES: return error_response(response, RESPONSE_FORBIDDEN);
-   case POSIX_ERROR: return error_response(response, RESPONSE_INTERNAL_ERROR);
+   debug(DEBUG_INFO, "cgi request: %s\n", cxn->env.query);
+
+   if ((type = cgi_request(&cxn->env, &cmd)) != RESPONSE_OK) {
+      return error_response(response, type);
    }
 
    debug(DEBUG_INFO, "Doing CGI action.\n");
@@ -372,6 +398,8 @@ static int process_cgi(struct connection* cxn) {
 static int process_json(struct connection* cxn) {
    enum JSON_CMD cmd;
    char* str = cxn->env.query + strlen("/json/");
+
+   debug(DEBUG_INFO, "json request: %s\n", cxn->env.query);
 
    if (strcmp(cxn->env.query, "/json/") == 0) {
       return error_response(&cxn->response, RESPONSE_NOT_FOUND);
@@ -397,38 +425,30 @@ static int process_json(struct connection* cxn) {
 static int process_request(struct connection* cxn) {
    char* tmp = cxn->request.filepath + strlen("docs/");
    struct stat stats;
-   struct env* env = &cxn->env;
    struct request* request = &cxn->request;
    struct response* response = &cxn->response;
-   int res;
+   enum RESPONSE_TYPE type;
+   int fd;
 
    debug(DEBUG_INFO, "Processing request buffer\n");
-   res = make_request_header(request);
+   type = make_request_header(request);
    print_request(request);
 
    //we're not supporing deflate right now
    response->usingDeflate = false;
    response->keepAlive = request->keepAlive;
+   cxn->env.method = requestType2String[request->type];
+   cxn->env.query = tmp;
 
-   switch (res) {
-   case NOT_ALLOWED:
-      return error_response(response, RESPONSE_METHOD_NOT_ALLOWED);
-   case BUFFER_OVERFLOW:
-      return error_response(response, RESPONSE_INTERNAL_ERROR);
-   case BAD_REQUEST:
-      return error_response(response, RESPONSE_BAD_REQUEST);
+   if (type != RESPONSE_OK) {
+      return error_response(response, type);
    }
 
-   if ((strstr(tmp, "/cgi-bin/"))) { //check for cgi
-      debug(DEBUG_INFO, "cgi request: %s\n", tmp);
-      env->method = "GET"; // fix....
-      env->query = tmp;
+   if ((strstr(tmp, "/cgi-bin/"))) {
       return process_cgi(cxn);
    }
 
    if (strstr(tmp, "/json/")) { //check for json
-      debug(DEBUG_INFO, "json request: %s\n", tmp);
-      env->query = tmp;
       return process_json(cxn);
    }
 
@@ -462,7 +482,7 @@ static int process_request(struct connection* cxn) {
    }
 
    response->contentLength = stats.st_size;
-   if ((res = open(request->filepath, O_RDONLY | O_NONBLOCK)) == -1) {
+   if ((fd = open(request->filepath, O_RDONLY | O_NONBLOCK)) == -1) {
       switch (errno) {
       case EACCES: return error_response(response, RESPONSE_FORBIDDEN);
       default:
@@ -472,7 +492,7 @@ static int process_request(struct connection* cxn) {
    }
 
    //debug(DEBUG_WARNING, "Content-Length is %d\n", response->contentLength);
-   cxn->file = res;
+   cxn->file = fd;
    return 0;
 }
 
@@ -510,7 +530,6 @@ static void close_connection(struct connection* cxn) {
    }
    close(cxn->socket);
    connections->erase(cxn->socket);
-   debug(DEBUG_INFO, "Freeing connection struct\n");
    free(cxn);
 }
 
@@ -683,26 +702,22 @@ static int error_response(struct response* response, enum RESPONSE_TYPE type) {
    char buf[BUF_LEN];
    int bytesWritten = 0;
 
+   debug(DEBUG_INFO, "Sending %s\n", responseType2String[type]);
    switch(type) {
    case RESPONSE_BAD_REQUEST:
-      debug(DEBUG_INFO, "Sending 400 Bad Request\n");
       bytesWritten = sprintf(buf, "%s", BODY_400);
       break;
    case RESPONSE_FORBIDDEN:
-      debug(DEBUG_INFO, "Sending 403 Forbidden\n");
       bytesWritten = sprintf(buf, "%s", BODY_403);
       break;
    case RESPONSE_NOT_FOUND:
-      debug(DEBUG_INFO, "Sending 404 Not Found\n");
       bytesWritten = sprintf(buf, "%s", BODY_404);
       break;
    case RESPONSE_METHOD_NOT_ALLOWED:
-      debug(DEBUG_INFO, "Sending 405 Method Not Allowed\n");
       bytesWritten = sprintf(buf, "%s", BODY_405);
       break;
    default:
    case RESPONSE_INTERNAL_ERROR:
-      debug(DEBUG_WARNING, "Sending 500 Internal\n");
       bytesWritten = sprintf(buf, "%s", BODY_500);
       break;
    }
@@ -711,6 +726,7 @@ static int error_response(struct response* response, enum RESPONSE_TYPE type) {
    response->contentLength = bytesWritten;
    response->contentType = "text/html";
    response->type = type;
+   response->keepAlive = false; //Don't keep the connection after an error
    make_response_header(response);
    memcpy(response->buffer + response->headerLength, buf, bytesWritten);
    response->bytesUsed += bytesWritten;
@@ -757,16 +773,8 @@ static int cgi_response(struct response* response, enum CGI_CMD cmd) {
    return cmd == CGI_GOODBYE ? QUIT : INTERNAL_RESPONSE;
 }
 
-//overloaded initally
-static int make_response_header(struct response* response) {
-   static const char* responseType2String[NUM_HTTP_RESPONSE_TYPES] = {
-      "200 OK",
-      "400 Bad Request",
-      "405 Method Not Allowed",
-      "403 Forbidden",
-      "404 Not Found",
-      "500 Internal Server Error"
-   };
+static void make_response_header(struct response* response) {
+   
    int written;
 
    written = snprintf(response->buffer, BUF_LEN, "HTTP/1.1 %s\r\n",
@@ -793,7 +801,6 @@ static int make_response_header(struct response* response) {
    }
    response->bytesUsed = response->headerLength = written;
    response->bytesToWrite = response->headerLength + response->contentLength;
-   return 0;
 }
 
 static int generate_listing(char* filepath, struct response* response) {
@@ -857,7 +864,8 @@ static int generate_listing(char* filepath, struct response* response) {
 
 //parse the request declaration
 //will modify the string in the request buffer via strtok!
-static int parse_request_declaration(struct request* request, char** filepath) {
+static enum RESPONSE_TYPE parse_request_declaration(struct request* request,
+                                                    char** filepath) {
    int i;
    char* tok;
    char* toks[NUM_REQ_DECL_PARTS];
@@ -868,7 +876,7 @@ static int parse_request_declaration(struct request* request, char** filepath) {
         i++, tok = strtok(NULL, " \n")) {
       if (i > NUM_REQ_DECL_PARTS - 1) {
          debug(DEBUG_WARNING, "Invalid HTTP request declaration\n");
-         return BAD_REQUEST; //should result in a 400
+         return RESPONSE_BAD_REQUEST; //should result in a 400
       }
       toks[i] = tok;
    }
@@ -877,7 +885,7 @@ static int parse_request_declaration(struct request* request, char** filepath) {
       request->type = REQUEST_GET;
    } else {
       debug(DEBUG_WARNING, "Method not supported: %s\n", toks[0]);
-      return NOT_ALLOWED; //should result in a 405
+      return RESPONSE_METHOD_NOT_ALLOWED; //should result in a 405
    }
 
    *filepath = toks[1];
@@ -891,18 +899,19 @@ static int parse_request_declaration(struct request* request, char** filepath) {
       request->httpVersion = -1;
    } else {
       debug(DEBUG_WARNING, "Unsupported HTTP protocol version (!).\n");
-      return BAD_REQUEST;
+      return RESPONSE_BAD_REQUEST;
    }
 
-   return 0;
+   return RESPONSE_OK;
 }
 
 //the return value of the function indicates whether there were any errors
 //all modification is done through pointers
-static int make_request_header(struct request* request) {
+static enum RESPONSE_TYPE make_request_header(struct request* request) {
    char* lineEnd, * tok, * tmp;
    char* lines[MAX_TOKS];
-   int i, numToks, res;
+   int i, numToks;
+   enum RESPONSE_TYPE res;
 
    //find the end of the first line of the request
    if ((lineEnd = (char * ) memmem(request->buffer,
@@ -910,11 +919,11 @@ static int make_request_header(struct request* request) {
                                    "\r\n",
                                    2)) == NULL) {
       debug(DEBUG_WARNING, "Can't find HTTP request declaration\n");
-      return BAD_REQUEST; //should result in a 400
+      return RESPONSE_BAD_REQUEST; //should result in a 400
    }
    *lineEnd = *(lineEnd + 1) = '\0';
 
-   if ((res = parse_request_declaration(request, &tmp))) {
+   if ((res = parse_request_declaration(request, &tmp)) != RESPONSE_OK) {
       return res;
    }
 
@@ -924,7 +933,7 @@ static int make_request_header(struct request* request) {
        i++, tok = strtok(NULL, "\r\n")) {
       if (i >= MAX_TOKS) {
          debug(DEBUG_WARNING, "Overflowed header lines buffer\n");
-         return BUFFER_OVERFLOW; //should result in a 500
+         return RESPONSE_INTERNAL_ERROR; //should result in a 500
       }
       lines[i] = tok;
    }
@@ -950,7 +959,7 @@ static int make_request_header(struct request* request) {
    }
    url_decode(tmp);
    snprintf(request->filepath, NAME_BUF_LEN, "docs%s", tmp);
-   return 0;
+   return RESPONSE_OK;
 }
 
 static inline const char* bool_to_string(bool b) {
@@ -959,12 +968,10 @@ static inline const char* bool_to_string(bool b) {
 
 static char* request_declaration_to_string(const struct request* request) {
    static char str[NAME_BUF_LEN];
-   static char* type2String[NUM_HTTP_REQUEST_TYPES] = {
-      "GET", "PUT", "POST", "DELETE"
-   };
+   
 
    snprintf(str, NAME_BUF_LEN, "%s %s HTTP/%.1lf",
-            type2String[request->type],
+            requestType2String[request->type],
             request->filepath + strlen("docs/"),
             request->httpVersion / 10.0 + 1.0);
    return str;
@@ -1036,7 +1043,7 @@ static void log_access(struct connection* cxn) {
 }
 
 // In pipes 0 is for writing, 1 is for reading
-static int cgi_request(struct env* env, enum CGI_CMD* cmd) {
+static enum RESPONSE_TYPE cgi_request(struct env* env, enum CGI_CMD* cmd) {
    socklen_t sockSize = sizeof(struct sockaddr_in6);
    struct sockaddr_in6 me;
    struct sockaddr_in6 server;
@@ -1048,17 +1055,17 @@ static int cgi_request(struct env* env, enum CGI_CMD* cmd) {
    if (strstr(env->query + strlen("/cgi-bin/"), "quit")) {
       *cmd = strcmp(env->query + strlen("/cgi-bin/quit"), "?confirm=1") ?
          CGI_BADPARAMS : CGI_GOODBYE;
-      return 0;
+      return RESPONSE_OK;
    }
 
    if (strcmp(env->query + strlen("/cgi-bin/"), "status") == 0) {
       debug(DEBUG_INFO, "cgi status requested\n");
       *cmd = CGI_STATUS;
-      return 0;
+      return RESPONSE_OK;
    }
 
    if (strcmp(env->query, "/cgi-bin/") == 0) {
-      return FILE_NOT_FOUND;
+      return RESPONSE_NOT_FOUND;
    }
 
    len = strlen(env->query) - strlen("/cgi-bin/");
@@ -1070,7 +1077,7 @@ static int cgi_request(struct env* env, enum CGI_CMD* cmd) {
    env->filepath = (char *) calloc(1, len + strlen("cgi/") + 1);
    if (env->filepath == NULL) {
       debug(DEBUG_WARNING, "Failed to allocate cgi filepath\n");
-      return POSIX_ERROR;
+      return RESPONSE_INTERNAL_ERROR;
    }
 
    memcpy(env->filepath + strlen("cgi/"),
@@ -1083,9 +1090,9 @@ static int cgi_request(struct env* env, enum CGI_CMD* cmd) {
    if (access(env->filepath, X_OK)) {
       free(env->filepath);
       switch(errno) {
-      case ENOENT: return FILE_NOT_FOUND;
-      case EACCES: return errno;
-      default: return POSIX_ERROR;
+      case ENOENT: return RESPONSE_NOT_FOUND;
+      case EACCES: return RESPONSE_FORBIDDEN;
+      default: return RESPONSE_INTERNAL_ERROR;
       }
    }
 
@@ -1093,14 +1100,14 @@ static int cgi_request(struct env* env, enum CGI_CMD* cmd) {
       getsockname(env->mySocket, (struct sockaddr *) &me, &sockSize)) {
       debug(DEBUG_WARNING, "Error getting server socket name\n");
       free(env->filepath);
-      return POSIX_ERROR;
+      return RESPONSE_INTERNAL_ERROR;
    }
 
    envvarSpace = (char *) calloc(NUM_ENV_VARS, ENV_BUF_LEN);
    if (envvarSpace == NULL) {
       debug(DEBUG_WARNING, "Allocating envvar space failed\n");
       free(env->filepath);
-      return POSIX_ERROR;
+      return RESPONSE_INTERNAL_ERROR;
    }
 
    for (i = 0; i < NUM_ENV_VARS; i++) {
@@ -1130,7 +1137,7 @@ static int cgi_request(struct env* env, enum CGI_CMD* cmd) {
    env->envvars[8] = NULL;
 
    *cmd = CGI_DO;
-   return 0;
+   return RESPONSE_OK;
 }
 
 static int do_cgi(struct env* env) {

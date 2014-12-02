@@ -12,16 +12,12 @@
 ///error codes///
 #define SIZE_CHANGE            -1
 #define STRUCT_NOT_FOUND       -2
-#define NOT_ALLOWED            -3
-#define BUFFER_OVERFLOW        -4
-#define FDARR_MODIFIED         -5
-#define QUIT                   -6
-#define BAD_SOCKET             -7
-#define POSIX_ERROR            -8
-#define INTERNAL_RESPONSE      -9
-#define BAD_REQUEST            -10
-#define FILE_NOT_FOUND         -11
-#define HTTP_CGI               -12
+#define FDARR_MODIFIED         -3
+#define QUIT                   -4
+#define BAD_SOCKET             -5
+#define POSIX_ERROR            -6
+#define INTERNAL_RESPONSE      -7
+#define HTTP_CGI               -8
 
 
 ///limitations///
@@ -172,8 +168,8 @@ struct response {
 } response;
 
 struct env {
+   const char* method;
    char* filepath;
-   char* method;
    char* query;
    char* envvars[NUM_ENV_VARS + 1]; //add 1 for the NULL terminator
    int childPid;
@@ -195,13 +191,10 @@ struct connection {
 
 
 ///function prototypes///
-static int make_request_header(struct request* request);
-static int make_response_header(struct response* response);
 static int cgi_response(struct response* response, enum CGI_CMD cmd);
 static int json_response(struct response* response, enum JSON_CMD cmd);
 static int error_response(struct response* response, enum RESPONSE_TYPE type);
 static int generate_listing(char* filepath, struct response* response);
-static int cgi_request(struct env* env, enum CGI_CMD* cmd);
 static int fdarr_cntl(enum FDARR_CMD cmd, ...);
 static int do_cgi(struct env* env);
 static int process_request(struct connection* cxn);
@@ -210,8 +203,8 @@ static int process_json(struct connection* cxn);
 static int process_mysock_events(int socket, short revents);
 static int process_cxfile_events(struct connection* cxn, short revents);
 static int process_cxsock_events(struct connection* cxn, short revents);
-static int parse_request_declaration(struct request* request, char** filepath);
-static void print_request(struct request* request); //fix the name on this
+static void make_response_header(struct response* response);
+static void print_request(struct request* request);
 static void close_connection(struct connection* cxn);
 static void reset_connection(struct connection* cxn);
 static void clean_exit(int unused);
@@ -221,12 +214,14 @@ static void log_access(struct connection* cxn);
 static void url_decode(char* url);
 static void debug(uint32_t debug, const char* msg, ...);
 static char* request_declaration_to_string(const struct request* request);
-static enum REQUEST_STATE fill_request_buffer(int socket,
-                                              char* buffer,
-                                              unsigned int* bytesUsed);
+static enum RESPONSE_TYPE cgi_request(struct env* env, enum CGI_CMD* cmd);
+static enum RESPONSE_TYPE make_request_header(struct request* request);
+static enum RESPONSE_TYPE parse_request_declaration(struct request* request, char** filepath);
+static enum REQUEST_STATE fill_request_buffer(int socket, char* buffer, unsigned int* bytesUsed);
 static inline const char* bool_to_string(bool b);
 static inline void set_debug_level(uintptr_t debugLevel);
 static inline void pexit(const char* str);
+
 
 ///request state prototypes///
 static int request_state_zero_read(struct connection* cxn);
