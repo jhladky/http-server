@@ -9,7 +9,7 @@
 #define DEBUG_INFO 2            //display info messages as well
 
 
-///error codes///
+///return codes///
 #define SIZE_CHANGE            -1
 #define STRUCT_NOT_FOUND       -2
 #define FDARR_MODIFIED         -3
@@ -18,6 +18,7 @@
 #define POSIX_ERROR            -6
 #define INTERNAL_RESPONSE      -7
 #define HTTP_CGI               -8
+#define HTTP_FORTUNE           -9
 
 
 ///limitations///
@@ -65,11 +66,6 @@
 #define BODY_JSON_ABOUT "{\n\"author\":\"Jacob Hladky\", "  \
    "\"email\":\"jhladky@calpoly.edu\", \"major\": \"CPE\"}"
 #define BODY_JSON_QUIT "{\n\"result\":\"success\"\n}"
-//IMPLEMENTED_1 is a limited version is the full feature set
-#define BODY_JSON_IMPLEMENTED_1 "[\n{ \"feature\": \"about\", "   \
-   "\"URL\": \"/json/about.json\"},{ \"feature\": \"quit\", "     \
-   "\"URL\": \"/json/quit\"},{ \"feature\": \"status\", "         \
-   "\"URL\": \"/json/status.json\"}]"
 #define BODY_JSON_IMPLEMENTED "[\n{ \"feature\": \"about\", "     \
    "\"URL\": \"/json/about.json\"},{ \"feature\": \"quit\", "     \
    "\"URL\": \"/json/quit\"},{ \"feature\": \"status\", "         \
@@ -116,6 +112,7 @@ enum CXN_STATE {
    ST_RESPONSE_HEA,
    ST_RESPONSE_FIL,
    ST_CGI_FIL,
+   ST_FORTUNE_FIL,
    ST_RESPONSE_FIN
 };
 
@@ -187,6 +184,7 @@ struct connection {
    struct env env;
    bool quit; //i don't like this... find a better way
    bool cgi; //maybe make bool, cgi, and a few others into a flags int...
+   bool fortune; //whether we are execing for fortune
 } connection;
 
 
@@ -196,12 +194,14 @@ static int json_response(struct response* response, enum JSON_CMD cmd);
 static int error_response(struct response* response, enum RESPONSE_TYPE type);
 static int generate_listing(char* filepath, struct response* response);
 static int fdarr_cntl(enum FDARR_CMD cmd, ...);
-static int do_cgi(struct env* env);
+static int do_cgi(struct connection* cxn);
+static int do_fortune(struct connection* cxn);
 static int process_request(struct connection* cxn);
 static int process_cgi(struct connection* cxn);
 static int process_json(struct connection* cxn);
 static int process_mysock_events(int socket, short revents);
 static int process_cxfile_events(struct connection* cxn, short revents);
+static int process_cxpipe_events(struct connection* cxn, short revents);
 static int process_cxsock_events(struct connection* cxn, short revents);
 static void make_response_header(struct response* response);
 static void print_request(struct request* request);
