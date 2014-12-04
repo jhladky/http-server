@@ -25,6 +25,7 @@
 #define BUF_LEN 1024
 #define NAME_BUF_LEN 64
 #define ENV_BUF_LEN 64
+#define FORTUNE_BUF_INIT_LEN 256
 #define AVG_LISTING_LEN 100
 #define MAX_TOKS 100
 #define FDARR_INIT_LEN 100
@@ -63,6 +64,8 @@
 
 
 ///json messages///
+#define BODY_FORTUNE_BEGIN "{\"fortune\": \""
+#define BODY_FORTUNE_END "\"}"
 #define BODY_JSON_ABOUT "{\n\"author\":\"Jacob Hladky\", "  \
    "\"email\":\"jhladky@calpoly.edu\", \"major\": \"CPE\"}"
 #define BODY_JSON_QUIT "{\n\"result\":\"success\"\n}"
@@ -72,7 +75,7 @@
    "\"URL\": \"/json/status.json\"},{ \"feature\": \"fortune\", " \
    "\"URL\": \"/json/fortune.json\"}]"
 #define BODY_JSON_STATUS "{\n\"num_clients\": %d, \"num_requests\": %d, " \
-   "\"errors\": %d, \"uptime\": %lf, \"cpu_time\": %lf, "                 \
+   "\"errors\": %d, \"uptime\": %lf, \"cpu_time\": %lf, "               \
    "\"memory_used\": %ld\n}"
 
 
@@ -105,14 +108,17 @@ enum FDARR_CMD {
    FDARR_CLEAN_UP
 };
 
+// JSON Fortune progression ST_REQUEST_INP -> *nothing* -> 
+
 enum CXN_STATE {
    ST_REQUEST_INP,
    ST_LOAD_FILE,
    ST_INTERNAL,
+   ST_CGI_FIL,
+   ST_FORTUNE_HEA,
+   ST_FORTUNE_FIL,
    ST_RESPONSE_HEA,
    ST_RESPONSE_FIL,
-   ST_CGI_FIL,
-   ST_FORTUNE_FIL,
    ST_RESPONSE_FIN
 };
 
@@ -139,6 +145,13 @@ enum RESPONSE_TYPE {
    RESPONSE_INTERNAL_ERROR       // 500
 };
 
+struct buf {
+   char _data[BUF_LEN];
+   char* data;
+   unsigned short bytesUsed;
+   unsigned short maxLen;
+} buf_wrapper;
+
 struct request {
    char buffer[BUF_LEN];
    enum REQUEST_STATE state;
@@ -162,6 +175,7 @@ struct response {
    bool usingDeflate;
    bool keepAlive;
    unsigned int bytesToWrite;
+   struct buf fortuneBuf;
 } response;
 
 struct env {
@@ -201,17 +215,17 @@ static int process_cgi(struct connection* cxn);
 static int process_json(struct connection* cxn);
 static int process_mysock_events(int socket, short revents);
 static int process_cxfile_events(struct connection* cxn, short revents);
-static int process_cxpipe_events(struct connection* cxn, short revents);
 static int process_cxsock_events(struct connection* cxn, short revents);
+static int fortune_decode(struct buf* buf);
+static int url_decode(char* url);
 static void make_response_header(struct response* response);
 static void print_request(struct request* request);
 static void close_connection(struct connection* cxn);
 static void reset_connection(struct connection* cxn);
 static void clean_exit(int unused);
-static void wait_cgi(int unused);
+static void wait_for_child(int unused);
 static void add_handler(int signal, void (*handlerFunc)(int));
 static void log_access(struct connection* cxn);
-static void url_decode(char* url);
 static void debug(uint32_t debug, const char* msg, ...);
 static char* request_declaration_to_string(const struct request* request);
 static enum RESPONSE_TYPE cgi_request(struct env* env, enum CGI_CMD* cmd);
@@ -220,6 +234,8 @@ static enum RESPONSE_TYPE parse_request_declaration(struct request* request, cha
 static enum REQUEST_STATE fill_request_buffer(int socket, char* buffer, unsigned int* bytesUsed);
 static inline const char* bool_to_string(bool b);
 static inline void set_debug_level(uintptr_t debugLevel);
+static inline void buf_init(struct buf* buf);
+static inline void buf_free(struct buf* buf);
 static inline void pexit(const char* str);
 
 

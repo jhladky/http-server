@@ -30,6 +30,8 @@
 // Hashtable linking file descriptors (either for a socket, pipe, or file)
 // to connection structs.
 static connections_t* connections = new connections_t(500);
+// Hashtable linking pids to connection structs.
+static connections_t* pids = new connections_t(10);
 // don't like this being global
 static FILE* accessLog;
 static ext_x_mime_t* ext2mime = new ext_x_mime_t({
@@ -75,7 +77,7 @@ int main(int argc, char* argv[]) {
    debug(DEBUG_INFO, "Server Starting...\n");
 
    add_handler(SIGINT, clean_exit);
-   add_handler(SIGCHLD, wait_cgi);
+   add_handler(SIGCHLD, wait_for_child);
 
    if (gettimeofday(&startTime, NULL) == -1) {
       pexit("gettimeofday");
@@ -169,9 +171,6 @@ int main(int argc, char* argv[]) {
          } else if (revents && fd == connections->at(fd)->socket) {
             debug(DEBUG_INFO, "* event on connection socket\n");
             res = process_cxsock_events(connections->at(fd), revents);
-         } else if(revents && fd == connections->at(fd)->file && connections->at(fd)->fortune) {
-            debug(DEBUG_INFO, "* event on pipe\n");
-            res = process_cxpipe_events(connections->at(fd), revents);
          } else if (revents && fd == connections->at(fd)->file) {
             debug(DEBUG_INFO, "* event on file\n");
             res = process_cxfile_events(connections->at(fd), revents);
@@ -263,13 +262,9 @@ static int process_cxsock_events(struct connection* cxn, short revents) {
       // In this state the request buffer (with HTTP headers) has been
       // prepared by error_response, or cgi_response, or json_response.
       // We send it, and we're done. The exception is for a normal CGI
-      // response or a fortune response, where we then have to fork.
+      // response where we then have to fork.
       res = write(cxn->socket, cxn->response.buffer, cxn->response.bytesToWrite);
-      if (cxn->cgi || cxn->fortune) {
-         cxn->state = ST_CGI_FIL;
-      } else {
-         cxn->state = ST_RESPONSE_FIN;
-      }
+      cxn->state = cxn->cgi ? ST_CGI_FIL : ST_RESPONSE_FIN;
    } else if (revents & POLLOUT && cxn->state == ST_RESPONSE_HEA) {
       debug(DEBUG_INFO, "cxsock, revent: POLLOUT, state: ST_RESPONSE_HEA\n");
 
@@ -306,36 +301,38 @@ static int process_cxsock_events(struct connection* cxn, short revents) {
          cxn->state =
             cxn->response.bytesToWrite ? ST_LOAD_FILE : ST_RESPONSE_FIN;
       }
+   } else if (revents & POLLOUT && cxn->state == ST_FORTUNE_FIL) {
+      debug(DEBUG_INFO, "cxsock, revent: POLLOUT, state: ST_FORTUNE_FIL\n");
+
+      if ((res = write(cxn->socket,
+                       cxn->response.buffer,
+                       cxn->response.bytesToWrite)) == -1) {
+         debug(DEBUG_WARNING, "write: %s\n", strerror(errno));
+         cxn->response.type = RESPONSE_INTERNAL_ERROR;
+         cxn->state = ST_RESPONSE_FIN;
+      } else {
+         cxn->response.bytesToWrite -= res;
+         cxn->state = cxn->response.bytesToWrite ? ST_FORTUNE_FIL : ST_RESPONSE_FIN;
+      }
    } else if (revents & POLLOUT && cxn->state == ST_CGI_FIL) {
       debug(DEBUG_INFO, "cxsock, revent: POLLOUT, state: ST_CGI_FIL\n");
 
-      if (!cxn->fortune) {
-         if (do_cgi(cxn) == POSIX_ERROR) {
-            // If there is an error, send a 500 and "go back" in the
-            // state machine to ST_INTERNAL. We do this by calling
-            // this function again. Since we changed the state
-            // the error actions will occur. We mannually specify the revent
-            // that will cause the internal response code to run.
-            error_response(&cxn->response, RESPONSE_INTERNAL_ERROR);
-            cxn->cgi = false;
-            cxn->state = ST_INTERNAL;
-            err = process_cxsock_events(cxn, POLLOUT);
-         } else {
-            // In a normal CGI response once we've forked we want to
-            // finish the response, so we call ourselves to immediately
-            // go to the 'end response' state.
-            cxn->state = ST_RESPONSE_FIN;
-            err = process_cxsock_events(cxn, POLLOUT);
-         }
+      if (do_cgi(cxn) == POSIX_ERROR) {
+         // If there is an error, send a 500 and "go back" in the
+         // state machine to ST_INTERNAL. We do this by calling
+         // this function again. Since we changed the state
+         // the error actions will occur. We mannually specify the revent
+         // that will cause the internal response code to run.
+         error_response(&cxn->response, RESPONSE_INTERNAL_ERROR);
+         cxn->cgi = false;
+         cxn->state = ST_INTERNAL;
+         err = process_cxsock_events(cxn, POLLOUT);
       } else {
-         if (do_fortune(cxn) == POSIX_ERROR) {
-            error_response(&cxn->response, RESPONSE_INTERNAL_ERROR);
-            cxn->fortune = false;
-            cxn->state = ST_INTERNAL;
-            err = process_cxsock_events(cxn, POLLOUT);
-         } else {
-            //cxn->state = ???;
-         }
+         // In a normal CGI response once we've forked we want to
+         // finish the response, so we call ourselves to immediately
+         // go to the 'end response' state.
+         cxn->state = ST_RESPONSE_FIN;
+         err = process_cxsock_events(cxn, POLLOUT);
       }
    } else if (revents & POLLOUT && cxn->state == ST_RESPONSE_FIN) {
       debug(DEBUG_INFO, "cxsock, revent: POLLOUT, state: ST_RESPONSE_FIN\n");
@@ -364,23 +361,69 @@ static int process_cxsock_events(struct connection* cxn, short revents) {
    return err;
 }
 
-static int process_cxpipe_events(struct connection* cxn, short revents) {
-   int err = 0;
-   
-   if (revents & POLLIN && cxn->state == ST_FORTUNE_FIL) {
-      debug(DEBUG_INFO, "cxpipe, revent: POLLIN, state: ST_FORTUNE_FIL\n");
-      //cxn->state = ST_RESPONSE_FIL; //(1)
-   }
-
-   return err;
-}
-
 static int process_cxfile_events(struct connection* cxn, short revents) {
-   int err = 0;
+   struct buf* fb;
+   int res, err = 0;
 
    if (revents & POLLIN && cxn->state == ST_LOAD_FILE) {
       debug(DEBUG_INFO, "cxfile, revent: POLLIN, state: ST_LOAD_FILE\n");
-      cxn->state = ST_RESPONSE_FIL; //(1)
+      cxn->state = ST_RESPONSE_FIL;
+   } else if (revents & POLLIN && cxn->state == ST_FORTUNE_HEA) {
+      debug(DEBUG_INFO, "cxfile, revent: POLLIN, state: ST_FORTUNE_HEA\n");
+
+      fb = &cxn->response.fortuneBuf;
+
+      // If res is -1 then we have a read error, so return a 500. If it is
+      // 0, or if it is less than the number of bytes requested, then we have
+      // reached EOF and need to send the fortune. If it is equal to number of
+      // bytes requested then enlarge the buffer and stay in this state.
+      if ((res = read(cxn->file, fb->data, fb->maxLen - fb->bytesUsed)) == -1) {
+         buf_free(fb);
+         error_response(&cxn->response, RESPONSE_INTERNAL_ERROR);
+         cxn->state = ST_INTERNAL;
+      } else if (res == 0 || res < fb->maxLen - fb->bytesUsed) {
+         fb->bytesUsed += res;
+         if (fortune_decode(fb) == POSIX_ERROR) {
+            error_response(&cxn->response, RESPONSE_INTERNAL_ERROR);
+            cxn->state = ST_INTERNAL;
+            buf_free(fb);
+            return 0; //should return at the bottom...
+         }
+         debug(DEBUG_WARNING, "bytes used is now %d\n", fb->bytesUsed);
+         cxn->response.contentLength =
+            fb->bytesUsed +
+            strlen(BODY_FORTUNE_BEGIN) +
+            strlen(BODY_FORTUNE_END);
+         cxn->response.contentType = "application/json";
+         make_response_header(&cxn->response);
+
+         // Copy the fortune json into the buffer
+         memcpy(cxn->response.buffer + cxn->response.bytesUsed,
+                BODY_FORTUNE_BEGIN, strlen(BODY_FORTUNE_BEGIN));
+         cxn->response.bytesUsed += strlen(BODY_FORTUNE_BEGIN);
+         memcpy(cxn->response.buffer + cxn->response.bytesUsed,
+                fb->data, fb->bytesUsed);
+         cxn->response.bytesUsed += fb->bytesUsed;
+         memcpy(cxn->response.buffer + cxn->response.bytesUsed,
+                BODY_FORTUNE_END, strlen(BODY_FORTUNE_END));
+         cxn->response.bytesUsed += strlen(BODY_FORTUNE_END);
+
+         cxn->response.bytesToWrite = cxn->response.bytesUsed;
+         // Close the pipe for reading, as we have copied everything out
+         // of it. Also remove the reference to the pipe in the
+         // connections table and the and the fdarr, and  zero out the fd.
+         connections->erase(cxn->file);
+         close(cxn->file);
+         fdarr_cntl(FDARR_REMOVE, cxn->file);
+         cxn->file = 0;
+         cxn->state = ST_FORTUNE_FIL;
+         buf_free(fb);
+      } else {
+         printf("I WAS HOPING I WOULD GET A SHORT FORTUNE\n");
+         clean_exit(0);
+      }
+   } else {
+      debug(DEBUG_WARNING, "cxfile, revent: unknown %08X, state: N/A\n", revents);
    }
 
    return err;
@@ -413,7 +456,15 @@ static int request_state_finished(struct connection* cxn) {
    switch(process_request(cxn)) {
    case HTTP_FORTUNE:
       cxn->fortune = true;
-      cxn->state = ST_INTERNAL;
+      if (do_fortune(cxn) == POSIX_ERROR) {
+         error_response(&cxn->response, RESPONSE_INTERNAL_ERROR);
+         cxn->state = ST_INTERNAL;
+      }
+      // Once we have forked the fortune process, we don't want any more
+      // events to trigger on this connection until the child exits.
+      // This way the pipe buffer will be complete and we can write it out
+      // in one go.
+      fdarr_cntl(FDARR_MODIFY, cxn->socket, 0);
       return 0;
    case HTTP_CGI:
       cxn->cgi = true;
@@ -733,19 +784,19 @@ static int json_response(struct response* response, enum JSON_CMD cmd) {
       debug(DEBUG_INFO, "JSON: fortune\n");
       return HTTP_FORTUNE;
    case JSON_IMPLEMENTED:
-      debug(DEBUG_INFO, "JSON: doing implemented.json\n");
+      debug(DEBUG_INFO, "JSON: implemented.json\n");
       bytesWritten = sprintf(buf, "%s", BODY_JSON_IMPLEMENTED);
       break;
    case JSON_ABOUT:
-      debug(DEBUG_INFO, "JSON: doing about.json\n");
+      debug(DEBUG_INFO, "JSON: about.json\n");
       bytesWritten = sprintf(buf, "%s", BODY_JSON_ABOUT);
       break;
    case JSON_QUIT:
-      debug(DEBUG_INFO, "JSON: doing quit\n");
+      debug(DEBUG_INFO, "JSON: quit\n");
       bytesWritten = sprintf(buf, "%s", BODY_JSON_QUIT);
       break;
    case JSON_STATUS:
-      debug(DEBUG_INFO, "JSON: doing status.json\n");
+      debug(DEBUG_INFO, "JSON: status.json\n");
       if (getrusage(RUSAGE_SELF, &usage) == -1 ||
           gettimeofday(&now, NULL) == -1) {
          return error_response(response, RESPONSE_INTERNAL_ERROR);
@@ -1056,9 +1107,41 @@ static void print_request(struct request* request) {
          bool_to_string(request->keepAlive));
 }
 
-//quick and dirty url decoding function. improve later.
-//(because it's pretty bad right now)
-static void url_decode(char* url) {
+// Quick and dirty JSON string escaping function. Improve Later.
+// As written may could easily create a buffer overflow error
+static int fortune_decode(struct buf* buf) {
+   char* tmp = (char *) malloc(buf->bytesUsed);
+   char* tmpPtr = tmp, * bufPtr = buf->data;
+   // extra counts the number of extra bytes we have from
+   // escaping the string characters
+   int extra = 0;
+
+   if (tmp == NULL) {
+      return POSIX_ERROR;
+   }
+
+   memcpy(tmp, buf->data, buf->bytesUsed);
+   while (tmpPtr - tmp < buf->bytesUsed &&
+          extra < buf->maxLen - buf->bytesUsed) {
+      if (*tmpPtr == '"') {
+         extra++;
+         *bufPtr++ = '\\';
+      }
+      *bufPtr++ = *tmpPtr++;
+   }
+   buf->bytesUsed += extra;
+   free(tmp);
+
+   if (extra >= buf->maxLen - buf->bytesUsed) {
+      debug(DEBUG_WARNING, "Buffer overflow in fortune_decode\n");
+      return POSIX_ERROR;
+   }
+   return 0;
+}
+
+// Quick and dirty url decoding function. Improve Later.
+// (because it's pretty bad right now)
+static int url_decode(char* url) {
    char* tmp = (char *) calloc(1, strlen(url) + 1);
    char hexBuf[3];
    int hexValue;
@@ -1082,6 +1165,7 @@ static void url_decode(char* url) {
 
    strcpy(url, tmp);
    free(tmp);
+   return 0;
 }
 
 //[requesting host] -- [[time]] "[request line]"
@@ -1208,7 +1292,7 @@ static enum RESPONSE_TYPE cgi_request(struct env* env, enum CGI_CMD* cmd) {
    return RESPONSE_OK;
 }
 
-/* Remember that in pipes, 0 is for writing, 1 is for reading */
+/* Remember that in pipes, 0 is for reading, 1 is for writing */
 static int do_fortune(struct connection* cxn) {
    int fortunePipe[2];
    
@@ -1223,21 +1307,21 @@ static int do_fortune(struct connection* cxn) {
       return POSIX_ERROR;
    } else if (cxn->env.childPid == 0) { //the child
       // Close the read pipe
-      close(fortunePipe[1]);
-      //dupe the write pipe
-      dup2(fortunePipe[0], STDOUT_FILENO);
+      close(fortunePipe[0]);
+      //dup the write pipe
+      dup2(fortunePipe[1], STDOUT_FILENO);
       execlp("fortune", "fortune", NULL);
-      debug(DEBUG_WARNING, "exec: %s\n", strerror(errno));
+      debug(DEBUG_ERROR, "exec: %s\n", strerror(errno));
       exit(EXIT_FAILURE);
    } else { // the parent
-      cxn->file = fortunePipe[1];
+      cxn->file = fortunePipe[0];
 
       // Close the write pipe
-      close(cxn->file);
+      close(fortunePipe[1]);
       //make the read pipe non blocking
       fcntl(cxn->file, F_SETFL, fcntl(cxn->file, F_GETFL) & ~O_NONBLOCK);
-      fdarr_cntl(FDARR_ADD, cxn->file, POLLIN);
       connections->insert(std::make_pair(cxn->file, cxn));
+      pids->insert(std::make_pair(cxn->env.childPid, cxn));
    }
    return 0;
 }
@@ -1314,19 +1398,48 @@ static void clean_exit(int unused) {
       }
    }
    delete connections;
+   delete pids;
    delete ext2mime;
    printf("Server exiting cleanly.\n");
    exit(EXIT_SUCCESS);
 }
 
-static void wait_cgi(int unused) {
-   int childStatus;
+static void wait_for_child(int unused) {
+   struct connection* cxn;
+   int childStatus, pid;
+
    debug(DEBUG_INFO, "Child signal received\n");
-   
-   if (waitpid(0, &childStatus, WNOHANG)) {
-      if (WIFEXITED(childStatus)) {
-         debug(DEBUG_INFO, "Child exits\n");
+
+   if ((pid = waitpid(0, &childStatus, WNOHANG)) == -1) {
+      debug(DEBUG_WARNING, "wait: %s\n", strerror(errno));
+   } else if (pid == 0) {
+      debug(DEBUG_WARNING, "0 return from wait!\n");
+   } else if (WIFEXITED(childStatus)) {
+      debug(DEBUG_INFO, "child with pid %d exits\n", pid);
+      if (pids->count(pid)) {
+         cxn = pids->at(pid);
+
+         // Add the fds for the socket and the pipe back to poll.
+         // We next want to deal with the fortune connection
+         // when we can read the data in the pipe buffer,
+         // i.e. a POLLIN event on cxn->file
+         fdarr_cntl(FDARR_MODIFY, cxn->socket, POLLOUT);
+         fdarr_cntl(FDARR_ADD, cxn->file, POLLIN);
+         cxn->state = ST_FORTUNE_HEA;
+         buf_init(&cxn->response.fortuneBuf);
       }
+   }
+}
+
+static inline void buf_init(struct buf* buf) {
+   buf->data = buf->_data;
+   buf->bytesUsed = 0;
+   buf->maxLen = BUF_LEN;
+}
+
+static inline void buf_free(struct buf* buf) {
+   if (buf->_data != buf->data) {
+      free(buf->data);
    }
 }
 
