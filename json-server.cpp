@@ -142,7 +142,6 @@ int main(int argc, char* argv[]) {
       int res, fd, revents;
 
       fdarr_cntl(FDARR_GET, &fds, &nfds);
-      debug(DEBUG_INFO, ">>> Calling poll\n");
       if ((res = poll(fds, nfds, -1)) == -1) {
          switch (errno) {
          case EINTR:
@@ -153,8 +152,6 @@ int main(int argc, char* argv[]) {
             exit(EXIT_FAILURE);
          }
       }
-
-      debug(DEBUG_INFO, "<<< Returning from poll\n");
       
       for (i = 0; i < nfds; i++) {
          fd = fds[i].fd;
@@ -166,16 +163,13 @@ int main(int argc, char* argv[]) {
          }
 
          if (revents && fd == mySock) {
-            debug(DEBUG_INFO, "* event on server socket\n");
             res = process_mysock_events(mySock, revents);
          } else if (revents && fd == connections->at(fd)->socket) {
-            debug(DEBUG_INFO, "* event on connection socket\n");
             res = process_cxsock_events(connections->at(fd), revents);
          } else if (revents && fd == connections->at(fd)->file) {
-            debug(DEBUG_INFO, "* event on file\n");
             res = process_cxfile_events(connections->at(fd), revents);
          } else if (revents) {
-            debug(DEBUG_INFO, "* unknown event!\n");
+            debug(DEBUG_WARNING, "Unknown event!\n");
          }
 
          //if the fdarr was modified, break from the loop
@@ -389,7 +383,6 @@ static int process_cxfile_events(struct connection* cxn, short revents) {
             buf_free(fb);
             return 0; //should return at the bottom...
          }
-         debug(DEBUG_WARNING, "bytes used is now %d\n", fb->bytesUsed);
          cxn->response.contentLength =
             fb->bytesUsed +
             strlen(BODY_FORTUNE_BEGIN) +
@@ -534,7 +527,7 @@ static int process_json(struct connection* cxn) {
       cmd = JSON_IMPLEMENTED;
    } else if (strcmp(str, "status.json") == 0) {
       cmd = JSON_STATUS;
-   } else if (strcmp(str, "fortune.json") == 0) {
+   } else if (strcmp(str, "fortune") == 0) {
       cmd = JSON_FORTUNE;
    } else {
       debug(DEBUG_WARNING, "Unsupported JSON operation requested: %s\n", str);

@@ -64,8 +64,8 @@
 
 
 ///json messages///
-#define BODY_FORTUNE_BEGIN "{\"fortune\": \""
-#define BODY_FORTUNE_END "\"}"
+#define BODY_FORTUNE_BEGIN "{\n\"fortune\": \""
+#define BODY_FORTUNE_END "\"\n}"
 #define BODY_JSON_ABOUT "{\n\"author\":\"Jacob Hladky\", "  \
    "\"email\":\"jhladky@calpoly.edu\", \"major\": \"CPE\"}"
 #define BODY_JSON_QUIT "{\n\"result\":\"success\"\n}"
@@ -73,7 +73,7 @@
    "\"URL\": \"/json/about.json\"},{ \"feature\": \"quit\", "     \
    "\"URL\": \"/json/quit\"},{ \"feature\": \"status\", "         \
    "\"URL\": \"/json/status.json\"},{ \"feature\": \"fortune\", " \
-   "\"URL\": \"/json/fortune.json\"}]"
+   "\"URL\": \"/json/fortune\"}]"
 #define BODY_JSON_STATUS "{\n\"num_clients\": %d, \"num_requests\": %d, " \
    "\"errors\": %d, \"uptime\": %lf, \"cpu_time\": %lf, "               \
    "\"memory_used\": %ld\n}"
