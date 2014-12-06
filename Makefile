@@ -1,6 +1,7 @@
 # CPE464 Makefile for Program 3: fishnode L3
 # Jacob Hladky
 # Modified 11/23/14 for JSON server project
+# Modified 12/05/14 for further expansion
 
 CC=gcc
 CPP=g++
@@ -33,16 +34,13 @@ else
 	ARCHFLAGS=
 endif
 
-json-server-$(EXEC_SUFFIX)-debug: json-server.cpp smartalloc-$(EXEC_SUFFIX).o
-	$(CPP) $(CPPFLAGS) -DDEBUG $(OSINC) $(OSLIB) $(OSFLAGS) $(ARCHFLAGS) $< smartalloc-$(EXEC_SUFFIX).o -o $@
+http-server-$(EXEC_SUFFIX)-debug: http-server.cpp
+	$(CPP) $(CPPFLAGS) -DDEBUG $(OSINC) $(OSLIB) $(OSFLAGS) $(ARCHFLAGS) $< -o $@
 
-json-server-$(EXEC_SUFFIX): json-server.cpp smartalloc-$(EXEC_SUFFIX).o 
-	$(CPP) $(CPPFLAGS) $(OSINC) $(OSLIB) $(OSFLAGS) $(ARCHFLAGS) $< smartalloc-$(EXEC_SUFFIX).o -o $@
+http-server-$(EXEC_SUFFIX): http-server.cpp
+	$(CPP) $(CPPFLAGS) $(OSINC) $(OSLIB) $(OSFLAGS) $(ARCHFLAGS) $< -o $@
 
-all: json-server-$(EXEC_SUFFIX)
-
-smartalloc-$(EXEC_SUFFIX).o: smartalloc.c
-	$(CC) $(CFLAGS) $(OSINC) $(OSFLAGS) $(ARCHFLAGS) -DSMARTALLOC_PEDANTIC -c $< -o $@
+all: http-server-$(EXEC_SUFFIX)
 
 clean:
-	-rm -rf json-server-* *.o
+	-rm -rf http-server-* *.o

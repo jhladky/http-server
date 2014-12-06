@@ -28,6 +28,6 @@
 *.app
 
 # Binaries
-json-server-*
+http-server-*
 access.log
 error.log

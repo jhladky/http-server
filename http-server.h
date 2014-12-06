@@ -3,10 +3,16 @@
 
 
 ///debug levels///
-#define DEBUG_NONE 0            //no debugging. Error messages will still be displayed.
-#define DEBUG_ERROR 0           //only display error messages.
-#define DEBUG_WARNING 1         //display warning messages as well
-#define DEBUG_INFO 2            //display info messages as well
+#define DEBUG_NONE             0x00   // No debugging. Error messages will still be displayed.
+#define DEBUG_ERROR            0x00   // Only display error messages.
+#define DEBUG_WARNING          0x01   // Display warning and error messages.
+#define DEBUG_INFO             0x02   // Display all messages.
+
+
+///connection opt defines///
+#define CXN_QUIT               0x01
+#define CXN_CGI                0x02
+#define CXN_FORTUNE            0x04
 
 
 ///return codes///
@@ -21,23 +27,27 @@
 #define HTTP_FORTUNE           -9
 
 
-///limitations///
-#define BUF_LEN 1024
-#define NAME_BUF_LEN 64
-#define ENV_BUF_LEN 64
-#define FORTUNE_BUF_INIT_LEN 256
-#define AVG_LISTING_LEN 100
-#define MAX_TOKS 100
-#define FDARR_INIT_LEN 100
-#define NUM_ENV_VARS 8
-#define NUM_DEBUG_LEVELS 3
+///all other defines///
+#define BUF_LEN                1024
+#define NAME_BUF_LEN           64
+#define ENV_BUF_LEN            64
+#define FORTUNE_BUF_INIT_LEN   256
+#define AVG_LISTING_LEN        100
+#define MAX_TOKS               100
+#define FDARR_INIT_LEN         100
+#define NUM_ENV_VARS           8
+#define NUM_DEBUG_LEVELS       3
 #define NUM_HTTP_REQUEST_TYPES 4
 #define NUM_HTTP_RESPONSE_TYPES 6
-#define NUM_REQUEST_STATES 4
-#define NUM_REQ_DECL_PARTS 3
+#define NUM_REQUEST_STATES     4
+#define NUM_REQ_DECL_PARTS     3
+#define DEBUG_SET              0xAAAAAAAA
+#define USEC_PER_SEC           100000.0
 
 
 ///http error messages//
+#define ERROR_BODY "<html><head><title>%s</title></head><body><h1>%s"   \
+   "</h1>%s</body></html>"
 #define BODY_LISTING_BEGIN "<HTML>\n<HEAD>\n<TITLE>Directory Listing"   \
    "</TITLE>\n</HEAD>\n<BODY>\n<H2>Directory Listing</H2><BR>\n<UL>\n"
 #define BODY_LISTING_END "</UL>\n</BODY>\n</HTML>\n"
@@ -46,21 +56,6 @@
 #define BODY_STATUS_END "<BR>\n<FORM METHOD=\"GET\" ACTION=\"quit\">\n<INPUT " \
    "TYPE=\"submit\" VALUE=\"Quit Server\"/>\n<INPUT TYPE=\"HIDDEN\" NAME=\"" \
    "confirm\" VALUE=\"1\"/>\n</FORM>\n</BODY>\n</HTML>\n"
-#define BODY_400 "<HTML><HEAD><TITLE>400 Bad Request</TITLE></HEAD><BODY>" \
-   "<H1>Bad Request</H1>The request could not be understood by this"    \
-   "server.</BODY></HTML>"
-#define BODY_403 "<HTML><HEAD><TITLE>HTTP ERROR 403</TITLE></HEAD><BODY>" \
-   "403 Forbidden.  Your request could not be completed due to "          \
-   "encountering HTTP error number 403.</BODY></HTML>"
-#define BODY_404 "<HTML><HEAD><TITLE>HTTP ERROR 404</TITLE></HEAD><BODY>" \
-   "404 Not Found.  Your request could not be completed due to "          \
-   "encountering HTTP error number 404.</BODY></HTML>"
-#define BODY_405 "<HTML><HEAD><TITLE>405 Method Not Allowed</TITLE>" \
-   "</HEAD><BODY><H1>Method Not Allowed</H1>The method is not "      \
-   "allowed for the requested url.</BODY></HTML>"
-#define BODY_500 "<HTML><HEAD><TITLE>HTTP ERROR 500</TITLE></HEAD><BODY>" \
-   "500 Internal Server Error.  Your request could not be completed due " \
-   "to encountering HTTP error number 500.</BODY></HTML>"
 
 
 ///json messages///
@@ -74,14 +69,6 @@
    "\"URL\": \"/json/quit\"},{ \"feature\": \"status\", "         \
    "\"URL\": \"/json/status.json\"},{ \"feature\": \"fortune\", " \
    "\"URL\": \"/json/fortune\"}]"
-#define BODY_JSON_STATUS "{\n\"num_clients\": %d, \"num_requests\": %d, " \
-   "\"errors\": %d, \"uptime\": %lf, \"cpu_time\": %lf, "               \
-   "\"memory_used\": %ld\n}"
-
-
-///all other defines///
-#define DEBUG_SET 0xAAAAAAAA
-#define USEC_PER_SEC 100000.0
 
 
 ///structs, unions, and enums///
@@ -96,7 +83,6 @@ enum JSON_CMD {
    JSON_QUIT,
    JSON_ABOUT,
    JSON_IMPLEMENTED,
-   JSON_STATUS,
    JSON_FORTUNE
 };
 
@@ -107,8 +93,6 @@ enum FDARR_CMD {
    FDARR_REMOVE,
    FDARR_CLEAN_UP
 };
-
-// JSON Fortune progression ST_REQUEST_INP -> *nothing* -> 
 
 enum CXN_STATE {
    ST_REQUEST_INP,
@@ -154,26 +138,26 @@ struct buf {
 
 struct request {
    char buffer[BUF_LEN];
+   unsigned int bytesUsed;
    enum REQUEST_STATE state;
    enum REQUEST_TYPE type;      //this and the two below come from the request declaration
    int httpVersion;             //-1 for HTTP/0.9, 0 for HTTP/1.0, 1 for HTTP/1.1
    char filepath[NAME_BUF_LEN]; //we have our own buffer for this so we don't mess up the main buffer 64B
-   unsigned int bytesUsed;
    const char* referer;         //these point to locations in buffer
    const char* userAgent;
-   bool keepAlive;
+   bool noKeepAlive;
    bool acceptDeflate;
 } request;
 
 struct response {
    char buffer[BUF_LEN];
-   enum RESPONSE_TYPE type;
    unsigned int bytesUsed;
+   enum RESPONSE_TYPE type;
    unsigned int contentLength;
    unsigned int headerLength;
    const char* contentType; //get this from the file ext
    bool usingDeflate;
-   bool keepAlive;
+   bool noKeepAlive;
    unsigned int bytesToWrite;
    struct buf fortuneBuf;
 } response;
@@ -189,16 +173,14 @@ struct env {
 } env;
 
 struct connection {
-   enum CXN_STATE state;     //the current state of the connection
-   int socket;               //fd of our socket
-   int file;                 //fd of our file
-   char* fileBuf;            //location of the file from mmap, maybe use sendfile... ?
-   struct request request;
-   struct response response;
-   struct env env;
-   bool quit; //i don't like this... find a better way
-   bool cgi; //maybe make bool, cgi, and a few others into a flags int...
-   bool fortune; //whether we are execing for fortune
+   enum CXN_STATE state;     // the current state of the connection
+   int socket;               // fd of our socket
+   int file;                 // fd of our file
+   char* fileBuf;            // location of the file from mmap
+   struct request request;   // 
+   struct response response; // 
+   struct env env;           // 
+   int opts;                 // various connection flags
 } connection;
 
 
@@ -249,18 +231,12 @@ static int request_state_finished(struct connection* cxn);
 ///c++ typedefs///
 typedef std::unordered_map<
    std::string,
-   std::string,
-   std::hash<std::string>,
-   std::equal_to<std::string>,
-   STLsmartalloc<std::pair<const std::string, std::string>>
+   std::string
 > ext_x_mime_t;
 
 typedef std::unordered_map<
    int,
-   struct connection *,
-   std::hash<int>,
-   std::equal_to<int>,
-   STLsmartalloc<std::pair<const int, struct connection *>>
+   struct connection *
 > connections_t;
 
 #endif

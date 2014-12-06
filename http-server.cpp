@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <netdb.h>
 #include <dirent.h>
+#include <errno.h>
 #include <poll.h>
 
 #include <sys/types.h>
@@ -23,8 +24,7 @@
 #include <unordered_map>
 #include <string>
 
-#include "smartalloc.h"
-#include "json-server.h"
+#include "http-server.h"
 
 
 // Hashtable linking file descriptors (either for a socket, pipe, or file)
@@ -58,10 +58,6 @@ static const char* requestType2String[NUM_HTTP_REQUEST_TYPES] = {
    "POST",
    "DELETE"
 };
-// lovin dat global data
-static int numClients = 0, numRequests = 0, errors = 0;
-static struct timeval startTime;
-
 
 int main(int argc, char* argv[]) {
    struct sockaddr_in6 me;
@@ -78,10 +74,6 @@ int main(int argc, char* argv[]) {
 
    add_handler(SIGINT, clean_exit);
    add_handler(SIGCHLD, wait_for_child);
-
-   if (gettimeofday(&startTime, NULL) == -1) {
-      pexit("gettimeofday");
-   }
 
    if ((accessLog = fopen("access.log", "a")) == NULL) {
       pexit("fopen");
@@ -172,8 +164,8 @@ int main(int argc, char* argv[]) {
             debug(DEBUG_WARNING, "Unknown event!\n");
          }
 
-         //if the fdarr was modified, break from the loop
-         //and start over completely with the right nfds value
+         // If the fdarr was modified, break from the loop
+         // and start over completely with the right nfds value.
          if (res == FDARR_MODIFIED) {
             debug(DEBUG_INFO, "Fdarr modified, breaking\n");
             break;
@@ -189,11 +181,6 @@ int main(int argc, char* argv[]) {
    return 0;
 }
 
-/* (1) Initialize connection struct to 0
- * (2) We can't generate an internal error b.c
- *     we can't communicate with the client...
- *     do just return and hope it doesn't happen again
- */
 static int process_mysock_events(int socket, short revents) {
    struct connection* cxn;
    struct sockaddr_in6 me;
@@ -203,29 +190,28 @@ static int process_mysock_events(int socket, short revents) {
 
    if (revents & POLLIN) {
       debug(DEBUG_INFO, "mysock, revent: POLLIN, state: N/A\n");
-      cxn = (struct connection *) calloc(1, sizeof(struct connection)); //(1)
+      cxn = (struct connection *) calloc(1, sizeof(struct connection));
       if (cxn == NULL) {
          return POSIX_ERROR;
       }
 
       cxn->socket = accept(socket, (struct sockaddr *) &me, &sockSize);
       if (cxn->socket == -1) {
+         // We can't generate an internal error because we can't
+         // communicate with the client, so we just return and hope it
+         // doesn't happen again
          debug(DEBUG_WARNING, "accept: %s\n", strerror(errno));
-         return BAD_SOCKET; //(2)
+         return BAD_SOCKET;
       }
 
-      cxn->state = ST_REQUEST_INP;
-      cxn->response.type = RESPONSE_OK;
       cxn->env.mySocket = cxn->socket;
       cxn->env.serverSocket = socket;
       debug(DEBUG_INFO, "Connected to %s\n",
             inet_ntop(AF_INET6, &me.sin6_addr, v6buf, INET6_ADDRSTRLEN));
-      numClients++;
 
       fdarr_cntl(FDARR_ADD, cxn->socket, POLLIN);
       err = FDARR_MODIFIED;
       connections->insert(std::make_pair(cxn->socket, cxn));
-      debug(DEBUG_INFO, "Allocated connection struct(%d)\n", cxn->socket);
    } else {
       debug(DEBUG_INFO, "mysock, revent: unknown, %08X, state: N/A\n", revents);
    }
@@ -251,14 +237,26 @@ static int process_cxsock_events(struct connection* cxn, short revents) {
                                             cxn->request.buffer,
                                             &cxn->request.bytesUsed)](cxn);
    } else if (revents & POLLOUT && cxn->state == ST_INTERNAL) {
-      debug(DEBUG_INFO, "cxsock, revent: POLLOUT, state: ST_RESPONSE_HEA\n");
+      debug(DEBUG_INFO, "cxsock, revent: POLLOUT, state: ST_INTERNAL\n");
 
       // In this state the request buffer (with HTTP headers) has been
       // prepared by error_response, or cgi_response, or json_response.
       // We send it, and we're done. The exception is for a normal CGI
       // response where we then have to fork.
-      res = write(cxn->socket, cxn->response.buffer, cxn->response.bytesToWrite);
-      cxn->state = cxn->cgi ? ST_CGI_FIL : ST_RESPONSE_FIN;
+      if ((res = write(cxn->socket,
+                       cxn->response.buffer,
+                       cxn->response.bytesToWrite)) == -1) {
+
+         // If there is an error from write, close the connection.
+         // We'll never send a 500 Internal Error (since we can't
+         // write on the socket!) but we mark set noKeepAlive
+         // so the connection gets closed.
+         debug(DEBUG_WARNING, "write: %s\n", strerror(errno));
+         cxn->request.noKeepAlive = true;
+         cxn->state = ST_RESPONSE_FIN;
+      }
+
+      cxn->state = (cxn->opts & CXN_CGI) ? ST_CGI_FIL : ST_RESPONSE_FIN;
    } else if (revents & POLLOUT && cxn->state == ST_RESPONSE_HEA) {
       debug(DEBUG_INFO, "cxsock, revent: POLLOUT, state: ST_RESPONSE_HEA\n");
 
@@ -266,13 +264,9 @@ static int process_cxsock_events(struct connection* cxn, short revents) {
       if ((res = write(cxn->socket,
                        cxn->response.buffer,
                        cxn->response.headerLength)) == -1) {
-         // If there is an error from write, close the connection.
-         // We'll never send a 500 Internal Error (since we can't
-         // write on the socket!) but we mark it as an error
-         // so the connection gets closed and not reset.
          debug(DEBUG_WARNING, "write: %s\n", strerror(errno));
-         cxn->response.type = RESPONSE_INTERNAL_ERROR;
-         cxn->state = ST_RESPONSE_FIN;
+         cxn->request.noKeepAlive = true;
+         cxn->state = ST_RESPONSE_FIN;  
       } else {
          cxn->response.bytesToWrite -= res;
          cxn->state = ST_RESPONSE_FIL;
@@ -318,7 +312,7 @@ static int process_cxsock_events(struct connection* cxn, short revents) {
          // the error actions will occur. We mannually specify the revent
          // that will cause the internal response code to run.
          error_response(&cxn->response, RESPONSE_INTERNAL_ERROR);
-         cxn->cgi = false;
+         cxn->opts &= ~CXN_CGI;
          cxn->state = ST_INTERNAL;
          err = process_cxsock_events(cxn, POLLOUT);
       } else {
@@ -333,15 +327,13 @@ static int process_cxsock_events(struct connection* cxn, short revents) {
 
       log_access(cxn);
 
-      if (cxn->quit) {
+      if (cxn->opts & CXN_QUIT) {
          clean_exit(0);
-      } else if (cxn->request.keepAlive && cxn->response.type == RESPONSE_OK) {
-         reset_connection(cxn);
-         cxn->state = ST_REQUEST_INP;
-      } else {
-         debug(DEBUG_INFO, "Keep alive not specified or "
-               "http error encountered; Closing connection\n");
+      } else if (cxn->request.noKeepAlive) {
+         debug(DEBUG_INFO, "`Connection: close` specified\n");
          close_connection(cxn);
+      } else {
+         reset_connection(cxn);
       }
       err = FDARR_MODIFIED;
    } else if (revents & POLLHUP || revents & POLLERR || revents & POLLNVAL) {
@@ -444,11 +436,10 @@ static int request_state_incomplete(struct connection* cxn) {
 static int request_state_finished(struct connection* cxn) {
    char* ptr;
 
-   numRequests++;
    fdarr_cntl(FDARR_MODIFY, cxn->socket, POLLIN | POLLOUT);
    switch(process_request(cxn)) {
    case HTTP_FORTUNE:
-      cxn->fortune = true;
+      cxn->opts |= CXN_FORTUNE;
       if (do_fortune(cxn) == POSIX_ERROR) {
          error_response(&cxn->response, RESPONSE_INTERNAL_ERROR);
          cxn->state = ST_INTERNAL;
@@ -459,12 +450,10 @@ static int request_state_finished(struct connection* cxn) {
       // in one go.
       fdarr_cntl(FDARR_MODIFY, cxn->socket, 0);
       return 0;
+   case QUIT: // We are intentionally using fallthrough here.
+      cxn->opts |= CXN_QUIT;
    case HTTP_CGI:
-      cxn->cgi = true;
-      cxn->state = ST_INTERNAL;
-      return 0;
-   case QUIT:
-      cxn->quit = true;
+      cxn->opts |= CXN_CGI;
       cxn->state = ST_INTERNAL;
       return 0;
    case INTERNAL_RESPONSE:
@@ -525,8 +514,6 @@ static int process_json(struct connection* cxn) {
       cmd = JSON_ABOUT;
    } else if (strcmp(str, "implemented.json") == 0) {
       cmd = JSON_IMPLEMENTED;
-   } else if (strcmp(str, "status.json") == 0) {
-      cmd = JSON_STATUS;
    } else if (strcmp(str, "fortune") == 0) {
       cmd = JSON_FORTUNE;
    } else {
@@ -552,7 +539,7 @@ static int process_request(struct connection* cxn) {
 
    //we're not supporing deflate right now
    response->usingDeflate = false;
-   response->keepAlive = request->keepAlive;
+   response->noKeepAlive = request->noKeepAlive;
    cxn->env.method = requestType2String[request->type];
    cxn->env.query = tmp;
 
@@ -607,19 +594,17 @@ static int process_request(struct connection* cxn) {
       }
    }
 
-   //debug(DEBUG_WARNING, "Content-Length is %d\n", response->contentLength);
    cxn->file = fd;
    return 0;
 }
 
-/*
- * (1) If there was an entry for the file in the file descriptor table, then
- * it is also open and in other data structures, so remove it from them.
- * If it was not in the table then erase will simply return 0. A file
- * descriptor may not be set in the connection because we might have done
- * an internal response such as a 404 in response to the request, instead of
- * sending a file.
- */
+
+// If there was an entry for the file in the file descriptor table, then
+// it is also open and in other data structures, so remove it from them.
+// If it was not in the table then erase will simply return 0. A file
+// descriptor may not be set in the connection because we might have done
+// an internal response such as a 404 in response to the request, instead of
+// sending a file. 
 static void reset_connection(struct connection* cxn) {
    int socket = cxn->socket;
    struct env env;
@@ -627,7 +612,7 @@ static void reset_connection(struct connection* cxn) {
    debug(DEBUG_INFO, "Resetting connection\n");
    env = cxn->env;
    fdarr_cntl(FDARR_MODIFY, cxn->socket, POLLIN);
-   if (connections->erase(cxn->file)) { // (1)
+   if (connections->erase(cxn->file)) {
       fdarr_cntl(FDARR_REMOVE, cxn->file);
       close(cxn->file);
       munmap(cxn->fileBuf, cxn->response.contentLength);
@@ -763,10 +748,6 @@ static int fdarr_cntl(enum FDARR_CMD cmd, ...) {
 
 static int json_response(struct response* response, enum JSON_CMD cmd) {
    int bytesWritten = 0;
-   long memUsage;
-   double cpuTime, timeDiff;
-   struct rusage usage;
-   struct timeval now;
    char buf[BUF_LEN];
 
    response->type = RESPONSE_OK;
@@ -788,23 +769,6 @@ static int json_response(struct response* response, enum JSON_CMD cmd) {
       debug(DEBUG_INFO, "JSON: quit\n");
       bytesWritten = sprintf(buf, "%s", BODY_JSON_QUIT);
       break;
-   case JSON_STATUS:
-      debug(DEBUG_INFO, "JSON: status.json\n");
-      if (getrusage(RUSAGE_SELF, &usage) == -1 ||
-          gettimeofday(&now, NULL) == -1) {
-         return error_response(response, RESPONSE_INTERNAL_ERROR);
-      }
-      memUsage = usage.ru_ixrss + usage.ru_idrss + usage.ru_isrss;
-      cpuTime = (usage.ru_utime.tv_sec * USEC_PER_SEC +
-                 usage.ru_stime.tv_sec * USEC_PER_SEC +
-                 usage.ru_utime.tv_usec +
-                 usage.ru_stime.tv_usec) / USEC_PER_SEC;
-      timeDiff = ((now.tv_sec * USEC_PER_SEC + now.tv_usec) -
-                  (startTime.tv_sec * USEC_PER_SEC +
-                   startTime.tv_usec)) / USEC_PER_SEC;
-      bytesWritten = sprintf(buf, BODY_JSON_STATUS, numClients, numRequests,
-                             errors, timeDiff, cpuTime, memUsage);
-      break;
    }
 
    response->contentLength = bytesWritten;
@@ -816,38 +780,28 @@ static int json_response(struct response* response, enum JSON_CMD cmd) {
 
 //an error response is a response that's not the normal HTTP 200 OK
 static int error_response(struct response* response, enum RESPONSE_TYPE type) {
+   static const char* responseType2Desc[NUM_HTTP_RESPONSE_TYPES] = {
+      "",
+      "The request could not be understood by this server.",
+      "The method is not allowed for the requested url.",
+      "",
+      "Page not found.",
+      "The request could not be completed due to "
+      "encountering an internal error"
+   };
    char buf[BUF_LEN];
    int bytesWritten = 0;
+   const char* title = responseType2String[type];
 
-   debug(DEBUG_INFO, "Sending %s\n", responseType2String[type]);
-   switch(type) {
-   case RESPONSE_BAD_REQUEST:
-      bytesWritten = sprintf(buf, "%s", BODY_400);
-      break;
-   case RESPONSE_FORBIDDEN:
-      bytesWritten = sprintf(buf, "%s", BODY_403);
-      break;
-   case RESPONSE_NOT_FOUND:
-      bytesWritten = sprintf(buf, "%s", BODY_404);
-      break;
-   case RESPONSE_METHOD_NOT_ALLOWED:
-      bytesWritten = sprintf(buf, "%s", BODY_405);
-      break;
-   default:
-   case RESPONSE_INTERNAL_ERROR:
-      bytesWritten = sprintf(buf, "%s", BODY_500);
-      break;
-   }
-
-   errors++;
+   debug(DEBUG_INFO, "Sending %s\n", title);
+   bytesWritten = snprintf(buf, BUF_LEN, ERROR_BODY, title, title,
+                           responseType2Desc[type]);
    response->contentLength = bytesWritten;
    response->contentType = "text/html";
    response->type = type;
-   response->keepAlive = false; // Don't keep the connection after an error
    make_response_header(response);
    memcpy(response->buffer + response->headerLength, buf, bytesWritten);
    response->bytesUsed += bytesWritten;
-
    return INTERNAL_RESPONSE;
 }
 
@@ -858,7 +812,6 @@ static int cgi_response(struct response* response, enum CGI_CMD cmd) {
 
    switch(cmd) {
    case CGI_BADPARAMS:
-      errors++;
       debug(DEBUG_INFO, "Sending Bad Params message\n");
       bytesWritten = sprintf(buf, "Bad Params!");
       break;
@@ -901,9 +854,9 @@ static void make_response_header(struct response* response) {
                           "Content-Type: %s\r\n", response->contentType);
    }
 
-   if (response->keepAlive) {
+   if (response->noKeepAlive) {
       written += snprintf(response->buffer + written, BUF_LEN - written,
-                          "Connection: Keep-Alive\r\n");
+                          "Connection: Close\r\n");
    }
 
    written += snprintf(response->buffer + written,
@@ -1054,11 +1007,9 @@ static enum RESPONSE_TYPE make_request_header(struct request* request) {
    request->referer = "";
    request->userAgent = "";
 
-   //we really need to change the way we determine keep-alive
-   //http/1.1 specifies persistent unless specifically stated otherwise
    for (i = 0; i < numToks; i++) {
-      if (strcasecmp(lines[i], "Connection: Keep-Alive") == 0) {
-         request->keepAlive = true;
+      if (strcasecmp(lines[i], "Connection: Close") == 0) {
+         request->noKeepAlive = true;
       } else if (strcasestr(lines[i], "Accept-Encoding:")) {
          if (strcasestr(lines[i] + strlen("Accept-Encoding:"), "deflate")) {
             request->acceptDeflate = true;
@@ -1069,7 +1020,11 @@ static enum RESPONSE_TYPE make_request_header(struct request* request) {
          request->userAgent = lines[i] + strlen("User Agent: ");
       }
    }
-   url_decode(tmp);
+
+   if (url_decode(tmp) == POSIX_ERROR) {
+      return RESPONSE_INTERNAL_ERROR;
+   }
+
    snprintf(request->filepath, NAME_BUF_LEN, "docs%s", tmp);
    return RESPONSE_OK;
 }
@@ -1080,7 +1035,6 @@ static inline const char* bool_to_string(bool b) {
 
 static char* request_declaration_to_string(const struct request* request) {
    static char str[NAME_BUF_LEN];
-   
 
    snprintf(str, NAME_BUF_LEN, "%s %s HTTP/%.1lf",
             requestType2String[request->type],
@@ -1094,10 +1048,10 @@ static void print_request(struct request* request) {
    debug(DEBUG_INFO, "Request: %s\n", request_declaration_to_string(request));
    debug(DEBUG_INFO, "|-HTTP-Option Referrer: %s\n", request->referer);
    debug(DEBUG_INFO, "|-HTTP-Option User-Agent: %s\n", request->userAgent);
-   debug(DEBUG_INFO, "|-HTTP-Option `Connection: Keep-Alive`?: %s\n",
-         bool_to_string(request->keepAlive));
+   debug(DEBUG_INFO, "|-HTTP-Option `Connection: Close`?: %s\n",
+         bool_to_string(request->noKeepAlive));
    debug(DEBUG_INFO, "|-HTTP-Option `Accept-Encoding: deflate`?: %s\n",
-         bool_to_string(request->keepAlive));
+         bool_to_string(request->acceptDeflate));
 }
 
 // Quick and dirty JSON string escaping function. Improve Later.
@@ -1141,6 +1095,10 @@ static int url_decode(char* url) {
    int len = strlen(url);
    char* urlPtr = url, * tmpPtr = tmp;
 
+   if (tmp == NULL) {
+      return POSIX_ERROR;
+   }
+   
    hexBuf[2] = '\0';
 
    while (urlPtr - url < len) {
@@ -1285,7 +1243,6 @@ static enum RESPONSE_TYPE cgi_request(struct env* env, enum CGI_CMD* cmd) {
    return RESPONSE_OK;
 }
 
-/* Remember that in pipes, 0 is for reading, 1 is for writing */
 static int do_fortune(struct connection* cxn) {
    int fortunePipe[2];
    
@@ -1333,7 +1290,7 @@ static int do_cgi(struct connection* cxn) {
       dup2(env->mySocket, 1);
 
       execle(env->filepath, env->filepath, NULL, env->envvars);
-      debug(DEBUG_WARNING, "Exec: %s\n", strerror(errno));
+      debug(DEBUG_WARNING, "exec: %s\n", strerror(errno));
       exit(EXIT_FAILURE);
    }
 
