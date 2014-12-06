@@ -70,7 +70,7 @@ int main(int argc, char* argv[]) {
 #else
    set_debug_level(DEBUG_NONE);
 #endif
-   debug(DEBUG_INFO, "Server Starting...\n");
+   debug(DEBUG_INFO, "Starting on port %d...\n", SERVER_PORT);
 
    add_handler(SIGINT, clean_exit);
    add_handler(SIGCHLD, wait_for_child);
@@ -90,6 +90,7 @@ int main(int argc, char* argv[]) {
 
    memset(&me, 0, sizeof(me));
    me.sin6_family = AF_INET6;
+   me.sin6_port = htons(SERVER_PORT);
    if (argc > 1) {
       if ((res = inet_pton(AF_INET6, argv[1], &me.sin6_addr)) == -1) {
          pexit("inet_pton");
@@ -112,10 +113,6 @@ int main(int argc, char* argv[]) {
    if (getsockname(mySock, (struct sockaddr *) &me, &sockSize)) {
       pexit("getsockname");
    }
-
-   printf("HTTP server is using TCP port %d\n", ntohs(me.sin6_port));
-   printf("HTTPS server is using TCP port -1\n");
-   fflush(stdout);
 
    if (listen(mySock, SOMAXCONN)) {
       pexit("listen");
@@ -144,7 +141,7 @@ int main(int argc, char* argv[]) {
             exit(EXIT_FAILURE);
          }
       }
-      
+
       for (i = 0; i < nfds; i++) {
          fd = fds[i].fd;
          revents = fds[i].revents;
@@ -219,8 +216,6 @@ static int process_mysock_events(int socket, short revents) {
    return err;
 }
 
-//note we have to escape the strings
-
 static int process_cxsock_events(struct connection* cxn, short revents) {
    static int (*frbActions[NUM_REQUEST_STATES])(struct connection *) = {
       request_state_zero_read,
@@ -266,7 +261,7 @@ static int process_cxsock_events(struct connection* cxn, short revents) {
                        cxn->response.headerLength)) == -1) {
          debug(DEBUG_WARNING, "write: %s\n", strerror(errno));
          cxn->request.noKeepAlive = true;
-         cxn->state = ST_RESPONSE_FIN;  
+         cxn->state = ST_RESPONSE_FIN;
       } else {
          cxn->response.bytesToWrite -= res;
          cxn->state = ST_RESPONSE_FIL;
@@ -285,7 +280,8 @@ static int process_cxsock_events(struct connection* cxn, short revents) {
       } else {
          cxn->response.bytesToWrite -= res;
          // If there are still bytes to write, then wait for the file to become
-         // available for reading. Otherwise we are done with the file and the request.
+         // available for reading. Otherwise we are done with the file
+         // and the request.
          cxn->state =
             cxn->response.bytesToWrite ? ST_LOAD_FILE : ST_RESPONSE_FIN;
       }
@@ -300,7 +296,8 @@ static int process_cxsock_events(struct connection* cxn, short revents) {
          cxn->state = ST_RESPONSE_FIN;
       } else {
          cxn->response.bytesToWrite -= res;
-         cxn->state = cxn->response.bytesToWrite ? ST_FORTUNE_FIL : ST_RESPONSE_FIN;
+         cxn->state = cxn->response.bytesToWrite ? ST_FORTUNE_FIL :
+            ST_RESPONSE_FIN;
       }
    } else if (revents & POLLOUT && cxn->state == ST_CGI_FIL) {
       debug(DEBUG_INFO, "cxsock, revent: POLLOUT, state: ST_CGI_FIL\n");
@@ -327,6 +324,8 @@ static int process_cxsock_events(struct connection* cxn, short revents) {
 
       log_access(cxn);
 
+      // This shouldn't actually be a state here, because
+      // we don't have to wait on any file descriptors to get to it
       if (cxn->request.noKeepAlive) {
          debug(DEBUG_INFO, "`Connection: close` specified\n");
          close_connection(cxn);
@@ -361,16 +360,14 @@ static int process_cxfile_events(struct connection* cxn, short revents) {
       // 0, or if it is less than the number of bytes requested, then we have
       // reached EOF and need to send the fortune. If it is equal to number of
       // bytes requested then enlarge the buffer and stay in this state.
-      if ((res = read(cxn->file, fb->data, fb->maxLen - fb->bytesUsed)) == -1) {
-         buf_free(fb);
+      if ((res = read(cxn->file, fb->data, BUF_LEN - fb->bytesUsed)) == -1) {
          error_response(&cxn->response, RESPONSE_INTERNAL_ERROR);
          cxn->state = ST_INTERNAL;
-      } else if (res == 0 || res < fb->maxLen - fb->bytesUsed) {
+      } else if (res == 0 || res < BUF_LEN - fb->bytesUsed) {
          fb->bytesUsed += res;
          if (fortune_decode(fb) == POSIX_ERROR) {
             error_response(&cxn->response, RESPONSE_INTERNAL_ERROR);
             cxn->state = ST_INTERNAL;
-            buf_free(fb);
             return 0; //should return at the bottom...
          }
          cxn->response.contentLength =
@@ -400,13 +397,13 @@ static int process_cxfile_events(struct connection* cxn, short revents) {
          fdarr_cntl(FDARR_REMOVE, cxn->file);
          cxn->file = 0;
          cxn->state = ST_FORTUNE_FIL;
-         buf_free(fb);
       } else {
          printf("I WAS HOPING I WOULD GET A SHORT FORTUNE\n");
          clean_exit(0);
       }
    } else {
-      debug(DEBUG_WARNING, "cxfile, revent: unknown %08X, state: N/A\n", revents);
+      debug(DEBUG_WARNING, "cxfile, revent: unknown %08X, state: N/A\n",
+            revents);
    }
 
    return err;
@@ -419,22 +416,21 @@ static int request_state_zero_read(struct connection* cxn) {
 }
 
 static int request_state_error(struct connection* cxn) {
-   debug(DEBUG_WARNING, "Error processing request...sending 500!\n");
    cxn->state = ST_INTERNAL;
-   fdarr_cntl(FDARR_MODIFY, cxn->socket, POLLIN | POLLOUT);
+   fdarr_cntl(FDARR_MODIFY, cxn->socket, POLLOUT);
    error_response(&cxn->response, RESPONSE_INTERNAL_ERROR);
    return 0;
 }
 
 static int request_state_incomplete(struct connection* cxn) {
-   // do nothing!
+   // Do nothing!
    return 0;
 }
 
 static int request_state_finished(struct connection* cxn) {
    char* ptr;
 
-   fdarr_cntl(FDARR_MODIFY, cxn->socket, POLLIN | POLLOUT);
+   fdarr_cntl(FDARR_MODIFY, cxn->socket, POLLOUT);
    switch(process_request(cxn)) {
    case HTTP_FORTUNE:
       cxn->opts |= CXN_FORTUNE;
@@ -465,20 +461,19 @@ static int request_state_finished(struct connection* cxn) {
       close(cxn->file);
       error_response(&cxn->response, RESPONSE_INTERNAL_ERROR);
       return 0;
-   } else {
-      cxn->state = ST_RESPONSE_HEA;
-      fdarr_cntl(FDARR_ADD, cxn->file, POLLIN);      
-      connections->insert(std::make_pair(cxn->file, cxn));
-      debug(DEBUG_INFO, "Adding fd to struct, #%d\n", cxn->file);
-      ptr = strrchr(cxn->request.filepath, '.');
-      if (ptr && ext2mime->count(std::string(ptr + 1))) {
-         cxn->response.contentType =
-            ext2mime->at(std::string(ptr +1)).c_str();
-      }
-
-      make_response_header(&cxn->response);
-      return FDARR_MODIFIED;
    }
+
+   cxn->state = ST_RESPONSE_HEA;
+   fdarr_cntl(FDARR_ADD, cxn->file, POLLIN);
+   connections->insert(std::make_pair(cxn->file, cxn));
+   ptr = strrchr(cxn->request.filepath, '.');
+   if (ptr && ext2mime->count(std::string(ptr + 1))) {
+      cxn->response.contentType =
+         ext2mime->at(std::string(ptr +1)).c_str();
+   }
+
+   make_response_header(&cxn->response);
+   return FDARR_MODIFIED;
 }
 
 static int cgi_request(struct connection* cxn) {
@@ -488,7 +483,7 @@ static int cgi_request(struct connection* cxn) {
 
    debug(DEBUG_INFO, "cgi request: %s\n", cxn->env.query);
 
-   if ((type = cgi_request(&cxn->env, &cmd)) != RESPONSE_OK) {
+   if ((type = parse_cgi_request(&cxn->env, &cmd)) != RESPONSE_OK) {
       return error_response(response, type);
    }
 
@@ -519,12 +514,12 @@ static int json_request(struct connection* cxn) {
    return json_response(&cxn->response, cmd);
 }
 
-static int file_request(struct connection* cxn) {   
+static int file_request(struct connection* cxn) {
    struct stat stats;
    struct request* request = &cxn->request;
    struct response* response = &cxn->response;
    int fd;
-   
+
    if (stat(request->filepath, &stats) == -1) {
       switch (errno) {
       case ENOENT: return error_response(response, RESPONSE_NOT_FOUND);
@@ -536,7 +531,6 @@ static int file_request(struct connection* cxn) {
    }
 
    if (S_ISDIR(stats.st_mode)) {
-      debug(DEBUG_INFO, "Is a directory.\n");
       if (request->filepath[strlen(request->filepath) - 1] != '/') {
          strcat(request->filepath, "/");
       }
@@ -572,10 +566,9 @@ static int process_request(struct connection* cxn) {
    char* tmp = cxn->request.filepath + strlen("docs");
    enum RESPONSE_TYPE type;
 
-   debug(DEBUG_INFO, "Processing request buffer\n");
    type = make_request_header(&cxn->request);
    print_request(&cxn->request);
-   
+
    // We're not supporing deflate right now.
    cxn->response.usingDeflate = false;
    cxn->response.noKeepAlive = cxn->request.noKeepAlive;
@@ -600,7 +593,7 @@ static int process_request(struct connection* cxn) {
 // If it was not in the table then erase will simply return 0. A file
 // descriptor may not be set in the connection because we might have done
 // an internal response such as a 404 in response to the request, instead of
-// sending a file. 
+// sending a file.
 static void reset_connection(struct connection* cxn) {
    int socket = cxn->socket;
    struct env env;
@@ -634,7 +627,7 @@ static void close_connection(struct connection* cxn) {
 static enum REQUEST_STATE fill_request_buffer(int socket,
                                               char* buffer,
                                               unsigned int* bytesUsed) {
-   int bytesRead = 0;
+   int bytesRead;
 
    if ((bytesRead = read(socket,
                          buffer + *bytesUsed,
@@ -642,7 +635,6 @@ static enum REQUEST_STATE fill_request_buffer(int socket,
       debug(DEBUG_WARNING, "read: %s\n", strerror(errno));
       return ST_ERROR;
    } else if (bytesRead == 0) {
-      debug(DEBUG_WARNING, "Zero read from socket\n");
       return ST_ZERO_READ;
    }
 
@@ -654,10 +646,8 @@ static enum REQUEST_STATE fill_request_buffer(int socket,
    }
 
    if (memmem(buffer, *bytesUsed, "\r\n\r\n", strlen("\r\n\r\n")) == NULL) {
-      debug(DEBUG_INFO, "Request incomplete.\n");
       return ST_INCOMPLETE;
    } else {
-      debug(DEBUG_INFO, "End of request found\n");
       return ST_FINISHED;
    }
 }
@@ -676,11 +666,11 @@ static int fdarr_cntl(enum FDARR_CMD cmd, ...) {
    if (nfds >= fdarrMaxSize - 1 || fds == NULL) {
       fdarrMaxSize *= 2;
       debug(DEBUG_INFO, "Expanding pollfd array from "
-            "size %d to size %d\n", nfds, fdarrMaxSize);
+            "%d to %d bytes\n", nfds, fdarrMaxSize);
       fds = (struct pollfd *) realloc(fds,
                                       fdarrMaxSize * sizeof(struct pollfd));
       if (fds == NULL) {
-         debug(DEBUG_WARNING, "Allocating pollfd array failed\n");
+         debug(DEBUG_ERROR, "Allocating pollfd array failed\n");
          return POSIX_ERROR;
       }
       err = SIZE_CHANGE;
@@ -697,8 +687,6 @@ static int fdarr_cntl(enum FDARR_CMD cmd, ...) {
       break;
    case FDARR_ADD:
       fds[nfds].fd = va_arg(args, int);
-      debug(DEBUG_INFO, "Adding %dth entry(%d) to "
-            "pollfd array\n", nfds, fds[nfds].fd);
       fds[nfds].events = (short) va_arg(args, int);
       nfds++;
       break;
@@ -725,15 +713,12 @@ static int fdarr_cntl(enum FDARR_CMD cmd, ...) {
          return STRUCT_NOT_FOUND;
       }
 
-      debug(DEBUG_INFO, "Removing %dth entry(%d) from "
-            "pollfd array\n", i, fd);
       if (i != nfds - 1 && nfds > 1) {
          memcpy(fds + i, fds + nfds - 1, sizeof(struct pollfd));
       }
       nfds--;
       break;
    case FDARR_CLEAN_UP:
-      debug(DEBUG_INFO, "Freeing pollfd array\n");
       free(fds);
       break;
    }
@@ -824,7 +809,7 @@ static int cgi_response(struct response* response, enum CGI_CMD cmd) {
    return INTERNAL_RESPONSE;
 }
 
-static void make_response_header(struct response* response) {   
+static void make_response_header(struct response* response) {
    int written;
 
    written = snprintf(response->buffer, BUF_LEN, "HTTP/1.1 %s\r\n",
@@ -921,8 +906,8 @@ static enum RESPONSE_TYPE parse_request_declaration(struct request* request,
         tok;
         i++, tok = strtok(NULL, " \n")) {
       if (i > NUM_REQ_DECL_PARTS - 1) {
-         debug(DEBUG_WARNING, "Invalid HTTP request declaration\n");
-         return RESPONSE_BAD_REQUEST; //should result in a 400
+         debug(DEBUG_INFO, "Invalid HTTP request declaration\n");
+         return RESPONSE_BAD_REQUEST;
       }
       toks[i] = tok;
    }
@@ -930,8 +915,8 @@ static enum RESPONSE_TYPE parse_request_declaration(struct request* request,
    if (strcasestr(toks[0], "GET")) {
       request->type = REQUEST_GET;
    } else {
-      debug(DEBUG_WARNING, "Method not supported: %s\n", toks[0]);
-      return RESPONSE_METHOD_NOT_ALLOWED; //should result in a 405
+      debug(DEBUG_INFO, "Method not supported: %s\n", toks[0]);
+      return RESPONSE_METHOD_NOT_ALLOWED;
    }
 
    *filepath = toks[1];
@@ -944,7 +929,7 @@ static enum RESPONSE_TYPE parse_request_declaration(struct request* request,
    } else if (strcasestr(toks[2], "HTTP/0.9")) {
       request->httpVersion = -1;
    } else {
-      debug(DEBUG_WARNING, "Unsupported HTTP protocol version (!).\n");
+      debug(DEBUG_INFO, "Unsupported HTTP protocol version (!).\n");
       return RESPONSE_BAD_REQUEST;
    }
 
@@ -960,12 +945,10 @@ static enum RESPONSE_TYPE make_request_header(struct request* request) {
    enum RESPONSE_TYPE res;
 
    //find the end of the first line of the request
-   if ((lineEnd = (char * ) memmem(request->buffer,
-                                   request->bytesUsed,
-                                   "\r\n",
-                                   2)) == NULL) {
-      debug(DEBUG_WARNING, "Can't find HTTP request declaration\n");
-      return RESPONSE_BAD_REQUEST; //should result in a 400
+   if ((lineEnd = (char *) memmem(request->buffer, request->bytesUsed,
+                                   "\r\n", 2)) == NULL) {
+      debug(DEBUG_INFO, "Can't find HTTP request declaration\n");
+      return RESPONSE_BAD_REQUEST;
    }
    *lineEnd = *(lineEnd + 1) = '\0';
 
@@ -975,11 +958,11 @@ static enum RESPONSE_TYPE make_request_header(struct request* request) {
 
    //split the remainder of the request up
    for (i = 0, tok = strtok(lineEnd + 2, "\r\n");
-       tok;
-       i++, tok = strtok(NULL, "\r\n")) {
+        tok;
+        i++, tok = strtok(NULL, "\r\n")) {
       if (i >= MAX_TOKS) {
-         debug(DEBUG_WARNING, "Overflowed header lines buffer\n");
-         return RESPONSE_INTERNAL_ERROR; //should result in a 500
+         debug(DEBUG_WARNING, "Overflowed header lines buffer!\n");
+         return RESPONSE_INTERNAL_ERROR;
       }
       lines[i] = tok;
    }
@@ -1038,19 +1021,18 @@ static void print_request(struct request* request) {
 // Quick and dirty JSON string escaping function. Improve Later.
 // As written may could easily create a buffer overflow error
 static int fortune_decode(struct buf* buf) {
-   char* tmp = (char *) malloc(buf->bytesUsed);
-   char* tmpPtr = tmp, * bufPtr = buf->data;
    // extra counts the number of extra bytes we have from
    // escaping the string characters
    int extra = 0;
+   char* tmp = (char *) malloc(buf->bytesUsed);
+   char* tmpPtr = tmp, * bufPtr = buf->data;
 
    if (tmp == NULL) {
       return POSIX_ERROR;
    }
 
    memcpy(tmp, buf->data, buf->bytesUsed);
-   while (tmpPtr - tmp < buf->bytesUsed &&
-          extra < buf->maxLen - buf->bytesUsed) {
+   while (tmpPtr - tmp < buf->bytesUsed && extra < BUF_LEN - buf->bytesUsed) {
       if (*tmpPtr == '"') {
          extra++;
          *bufPtr++ = '\\';
@@ -1060,26 +1042,27 @@ static int fortune_decode(struct buf* buf) {
    buf->bytesUsed += extra;
    free(tmp);
 
-   if (extra >= buf->maxLen - buf->bytesUsed) {
+   if (extra >= BUF_LEN - buf->bytesUsed) {
       debug(DEBUG_WARNING, "Buffer overflow in fortune_decode\n");
       return POSIX_ERROR;
    }
    return 0;
 }
 
-// Quick and dirty url decoding function. Improve Later.
-// (because it's pretty bad right now)
+// There will be no buffer overflow errors in this function because decoding
+// the hex codes for the invalid URL chars, e.g. `%20` -> ' ' always results
+// in fewer characters.
 static int url_decode(char* url) {
-   char* tmp = (char *) calloc(1, strlen(url) + 1);
+   int len = strlen(url);
+   char* tmp = (char *) malloc(len + 1);
    char hexBuf[3];
    int hexValue;
-   int len = strlen(url);
    char* urlPtr = url, * tmpPtr = tmp;
 
    if (tmp == NULL) {
       return POSIX_ERROR;
    }
-   
+
    hexBuf[2] = '\0';
 
    while (urlPtr - url < len) {
@@ -1127,7 +1110,8 @@ static void log_access(struct connection* cxn) {
 }
 
 // In pipes 0 is for writing, 1 is for reading
-static enum RESPONSE_TYPE cgi_request(struct env* env, enum CGI_CMD* cmd) {
+static enum RESPONSE_TYPE parse_cgi_request(struct env* env,
+                                            enum CGI_CMD* cmd) {
    socklen_t sockSize = sizeof(struct sockaddr_in6);
    struct sockaddr_in6 me;
    struct sockaddr_in6 server;
@@ -1137,7 +1121,6 @@ static enum RESPONSE_TYPE cgi_request(struct env* env, enum CGI_CMD* cmd) {
    bool hasParams = false;
 
    if (strcmp(env->query + strlen("/cgi-bin/"), "status") == 0) {
-      debug(DEBUG_INFO, "cgi status requested\n");
       *cmd = CGI_STATUS;
       return RESPONSE_OK;
    }
@@ -1219,7 +1202,7 @@ static enum RESPONSE_TYPE cgi_request(struct env* env, enum CGI_CMD* cmd) {
 
 static int do_fortune(struct connection* cxn) {
    int fortunePipe[2];
-   
+
    debug(DEBUG_INFO, "Fortune operation in progress\n");
    if (pipe(fortunePipe) == -1) {
       debug(DEBUG_WARNING, "pipe: %s\n", strerror(errno));
@@ -1356,15 +1339,7 @@ static void wait_for_child(int unused) {
 }
 
 static inline void buf_init(struct buf* buf) {
-   buf->data = buf->_data;
    buf->bytesUsed = 0;
-   buf->maxLen = BUF_LEN;
-}
-
-static inline void buf_free(struct buf* buf) {
-   if (buf->_data != buf->data) {
-      free(buf->data);
-   }
 }
 
 //sets up a signal handler

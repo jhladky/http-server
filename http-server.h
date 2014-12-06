@@ -3,44 +3,45 @@
 
 
 ///debug levels///
-#define DEBUG_NONE             0x00   // No debugging. Error messages will still be displayed.
-#define DEBUG_ERROR            0x00   // Only display error messages.
-#define DEBUG_WARNING          0x01   // Display warning and error messages.
-#define DEBUG_INFO             0x02   // Display all messages.
+#define DEBUG_NONE                  0x00   // No debugging. Error messages will still be displayed.
+#define DEBUG_ERROR                 0x00   // Only display error messages.
+#define DEBUG_WARNING               0x01   // Display warning and error messages.
+#define DEBUG_INFO                  0x02   // Display all messages.
 
 
 ///connection opt defines///
-#define CXN_CGI                0x02
-#define CXN_FORTUNE            0x04
+#define CXN_CGI                     0x02
+#define CXN_FORTUNE                 0x04
 
 
 ///return codes///
-#define SIZE_CHANGE            -1
-#define STRUCT_NOT_FOUND       -2
-#define FDARR_MODIFIED         -3
-#define BAD_SOCKET             -4
-#define POSIX_ERROR            -5
-#define INTERNAL_RESPONSE      -6
-#define HTTP_CGI               -7
-#define HTTP_FORTUNE           -8
+#define SIZE_CHANGE                 -1
+#define STRUCT_NOT_FOUND            -2
+#define FDARR_MODIFIED              -3
+#define BAD_SOCKET                  -4
+#define POSIX_ERROR                 -5
+#define INTERNAL_RESPONSE           -6
+#define HTTP_CGI                    -7
+#define HTTP_FORTUNE                -8
 
 
 ///all other defines///
-#define BUF_LEN                1024
-#define NAME_BUF_LEN           64
-#define ENV_BUF_LEN            64
-#define FORTUNE_BUF_INIT_LEN   256
-#define AVG_LISTING_LEN        100
-#define MAX_TOKS               100
-#define FDARR_INIT_LEN         100
-#define NUM_ENV_VARS           8
-#define NUM_DEBUG_LEVELS       3
-#define NUM_HTTP_REQUEST_TYPES 4
-#define NUM_HTTP_RESPONSE_TYPES 6
-#define NUM_REQUEST_STATES     4
-#define NUM_REQ_DECL_PARTS     3
-#define DEBUG_SET              0xAAAAAAAA
-#define USEC_PER_SEC           100000.0
+#define SERVER_PORT                 5050
+#define BUF_LEN                     1024
+#define NAME_BUF_LEN                64
+#define ENV_BUF_LEN                 64
+#define FORTUNE_BUF_INIT_LEN        256
+#define AVG_LISTING_LEN             100
+#define MAX_TOKS                    100
+#define FDARR_INIT_LEN              100
+#define NUM_ENV_VARS                8
+#define NUM_DEBUG_LEVELS            3
+#define NUM_HTTP_REQUEST_TYPES      4
+#define NUM_HTTP_RESPONSE_TYPES     6
+#define NUM_REQUEST_STATES          4
+#define NUM_REQ_DECL_PARTS          3
+#define DEBUG_SET                   0xAAAAAAAA
+#define USEC_PER_SEC                100000.0
 
 
 ///http error messages//
@@ -114,6 +115,10 @@ enum REQUEST_TYPE {
    REQUEST_DELETE
 };
 
+enum RESPONSE_STATE {
+   // Fill me in!
+};
+
 enum RESPONSE_TYPE {
    RESPONSE_OK,                  // 200
    RESPONSE_BAD_REQUEST,         // 400
@@ -124,11 +129,10 @@ enum RESPONSE_TYPE {
 };
 
 struct buf {
-   char _data[BUF_LEN];
-   char* data;
+   char data[BUF_LEN];
    unsigned short bytesUsed;
-   unsigned short maxLen;
-} buf_wrapper;
+   unsigned short bytesWritten;
+};
 
 struct request {
    char buffer[BUF_LEN];
@@ -141,7 +145,7 @@ struct request {
    const char* userAgent;
    bool noKeepAlive;
    bool acceptDeflate;
-} request;
+};
 
 struct response {
    char buffer[BUF_LEN];
@@ -150,11 +154,11 @@ struct response {
    unsigned int contentLength;
    unsigned int headerLength;
    const char* contentType; //get this from the file ext
-   bool usingDeflate;
-   bool noKeepAlive;
    unsigned int bytesToWrite;
    struct buf fortuneBuf;
-} response;
+   bool noKeepAlive;
+   bool usingDeflate;
+};
 
 struct env {
    const char* method;
@@ -164,7 +168,7 @@ struct env {
    int childPid;
    int mySocket;  //a copy of the connection socket... rename to cxnSocket
    int serverSocket; //a copy of the server's socket
-} env;
+};
 
 struct connection {
    enum CXN_STATE state;     // the current state of the connection
@@ -175,7 +179,7 @@ struct connection {
    struct response response; // 
    struct env env;           // 
    int opts;                 // various connection flags
-} connection;
+};
 
 
 ///function prototypes///
@@ -205,14 +209,13 @@ static void add_handler(int signal, void (*handlerFunc)(int));
 static void log_access(struct connection* cxn);
 static void debug(uint32_t debug, const char* msg, ...);
 static char* request_declaration_to_string(const struct request* request);
-static enum RESPONSE_TYPE cgi_request(struct env* env, enum CGI_CMD* cmd);
+static enum RESPONSE_TYPE parse_cgi_request(struct env* env, enum CGI_CMD* cmd);
 static enum RESPONSE_TYPE make_request_header(struct request* request);
 static enum RESPONSE_TYPE parse_request_declaration(struct request* request, char** filepath);
 static enum REQUEST_STATE fill_request_buffer(int socket, char* buffer, unsigned int* bytesUsed);
 static inline const char* bool_to_string(bool b);
 static inline void set_debug_level(uintptr_t debugLevel);
 static inline void buf_init(struct buf* buf);
-static inline void buf_free(struct buf* buf);
 static inline void pexit(const char* str);
 
 
