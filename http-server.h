@@ -10,7 +10,6 @@
 
 
 ///connection opt defines///
-#define CXN_QUIT               0x01
 #define CXN_CGI                0x02
 #define CXN_FORTUNE            0x04
 
@@ -19,12 +18,11 @@
 #define SIZE_CHANGE            -1
 #define STRUCT_NOT_FOUND       -2
 #define FDARR_MODIFIED         -3
-#define QUIT                   -4
-#define BAD_SOCKET             -5
-#define POSIX_ERROR            -6
-#define INTERNAL_RESPONSE      -7
-#define HTTP_CGI               -8
-#define HTTP_FORTUNE           -9
+#define BAD_SOCKET             -4
+#define POSIX_ERROR            -5
+#define INTERNAL_RESPONSE      -6
+#define HTTP_CGI               -7
+#define HTTP_FORTUNE           -8
 
 
 ///all other defines///
@@ -47,7 +45,7 @@
 
 ///http error messages//
 #define ERROR_BODY "<html><head><title>%s</title></head><body><h1>%s"   \
-   "</h1>%s</body></html>"
+   "</h1>%s</body></html>\n"
 #define BODY_LISTING_BEGIN "<HTML>\n<HEAD>\n<TITLE>Directory Listing"   \
    "</TITLE>\n</HEAD>\n<BODY>\n<H2>Directory Listing</H2><BR>\n<UL>\n"
 #define BODY_LISTING_END "</UL>\n</BODY>\n</HTML>\n"
@@ -63,7 +61,6 @@
 #define BODY_FORTUNE_END "\"\n}"
 #define BODY_JSON_ABOUT "{\n\"author\":\"Jacob Hladky\", "  \
    "\"email\":\"jhladky@calpoly.edu\", \"major\": \"CPE\"}"
-#define BODY_JSON_QUIT "{\n\"result\":\"success\"\n}"
 #define BODY_JSON_IMPLEMENTED "[\n{ \"feature\": \"about\", "     \
    "\"URL\": \"/json/about.json\"},{ \"feature\": \"quit\", "     \
    "\"URL\": \"/json/quit\"},{ \"feature\": \"status\", "         \
@@ -73,14 +70,11 @@
 
 ///structs, unions, and enums///
 enum CGI_CMD {
-   CGI_BADPARAMS,
    CGI_STATUS,
-   CGI_DO,
-   CGI_GOODBYE
+   CGI_DO
 };
 
 enum JSON_CMD {
-   JSON_QUIT,
    JSON_ABOUT,
    JSON_IMPLEMENTED,
    JSON_FORTUNE
@@ -192,13 +186,14 @@ static int generate_listing(char* filepath, struct response* response);
 static int fdarr_cntl(enum FDARR_CMD cmd, ...);
 static int do_cgi(struct connection* cxn);
 static int do_fortune(struct connection* cxn);
+static int fortune_decode(struct buf* buf);
 static int process_request(struct connection* cxn);
-static int process_cgi(struct connection* cxn);
-static int process_json(struct connection* cxn);
+static int cgi_request(struct connection* cxn);
+static int json_request(struct connection* cxn);
+static int file_request(struct connection* cxn);
 static int process_mysock_events(int socket, short revents);
 static int process_cxfile_events(struct connection* cxn, short revents);
 static int process_cxsock_events(struct connection* cxn, short revents);
-static int fortune_decode(struct buf* buf);
 static int url_decode(char* url);
 static void make_response_header(struct response* response);
 static void print_request(struct request* request);
@@ -229,14 +224,7 @@ static int request_state_finished(struct connection* cxn);
 
 
 ///c++ typedefs///
-typedef std::unordered_map<
-   std::string,
-   std::string
-> ext_x_mime_t;
-
-typedef std::unordered_map<
-   int,
-   struct connection *
-> connections_t;
+typedef std::unordered_map<std::string, std::string> ext_x_mime_t;
+typedef std::unordered_map<int, struct connection *> connections_t;
 
 #endif

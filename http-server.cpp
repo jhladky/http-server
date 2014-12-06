@@ -327,9 +327,7 @@ static int process_cxsock_events(struct connection* cxn, short revents) {
 
       log_access(cxn);
 
-      if (cxn->opts & CXN_QUIT) {
-         clean_exit(0);
-      } else if (cxn->request.noKeepAlive) {
+      if (cxn->request.noKeepAlive) {
          debug(DEBUG_INFO, "`Connection: close` specified\n");
          close_connection(cxn);
       } else {
@@ -450,8 +448,6 @@ static int request_state_finished(struct connection* cxn) {
       // in one go.
       fdarr_cntl(FDARR_MODIFY, cxn->socket, 0);
       return 0;
-   case QUIT: // We are intentionally using fallthrough here.
-      cxn->opts |= CXN_QUIT;
    case HTTP_CGI:
       cxn->opts |= CXN_CGI;
       cxn->state = ST_INTERNAL;
@@ -485,9 +481,9 @@ static int request_state_finished(struct connection* cxn) {
    }
 }
 
-static int process_cgi(struct connection* cxn) {
+static int cgi_request(struct connection* cxn) {
    struct response* response = &cxn->response;
-   enum CGI_CMD cmd = CGI_BADPARAMS; //initialize to default
+   enum CGI_CMD cmd = CGI_STATUS; // Initialize to default.
    enum RESPONSE_TYPE type;
 
    debug(DEBUG_INFO, "cgi request: %s\n", cxn->env.query);
@@ -500,7 +496,7 @@ static int process_cgi(struct connection* cxn) {
    return cgi_response(&cxn->response, cmd);
 }
 
-static int process_json(struct connection* cxn) {
+static int json_request(struct connection* cxn) {
    enum JSON_CMD cmd;
    char* str = cxn->env.query + strlen("/json/");
 
@@ -508,8 +504,6 @@ static int process_json(struct connection* cxn) {
 
    if (strcmp(cxn->env.query, "/json/") == 0) {
       return error_response(&cxn->response, RESPONSE_NOT_FOUND);
-   } else if (strcmp(str, "quit") == 0) {
-      cmd = JSON_QUIT;
    } else if (strcmp(str, "about.json") == 0) {
       cmd = JSON_ABOUT;
    } else if (strcmp(str, "implemented.json") == 0) {
@@ -525,36 +519,12 @@ static int process_json(struct connection* cxn) {
    return json_response(&cxn->response, cmd);
 }
 
-static int process_request(struct connection* cxn) {
-   char* tmp = cxn->request.filepath + strlen("docs");
+static int file_request(struct connection* cxn) {   
    struct stat stats;
    struct request* request = &cxn->request;
    struct response* response = &cxn->response;
-   enum RESPONSE_TYPE type;
    int fd;
-
-   debug(DEBUG_INFO, "Processing request buffer\n");
-   type = make_request_header(request);
-   print_request(request);
-
-   //we're not supporing deflate right now
-   response->usingDeflate = false;
-   response->noKeepAlive = request->noKeepAlive;
-   cxn->env.method = requestType2String[request->type];
-   cxn->env.query = tmp;
-
-   if (type != RESPONSE_OK) {
-      return error_response(response, type);
-   }
-
-   if ((strstr(tmp, "/cgi-bin/"))) {
-      return process_cgi(cxn);
-   }
-
-   if (strstr(tmp, "/json/")) { //check for json
-      return process_json(cxn);
-   }
-
+   
    if (stat(request->filepath, &stats) == -1) {
       switch (errno) {
       case ENOENT: return error_response(response, RESPONSE_NOT_FOUND);
@@ -598,6 +568,32 @@ static int process_request(struct connection* cxn) {
    return 0;
 }
 
+static int process_request(struct connection* cxn) {
+   char* tmp = cxn->request.filepath + strlen("docs");
+   enum RESPONSE_TYPE type;
+
+   debug(DEBUG_INFO, "Processing request buffer\n");
+   type = make_request_header(&cxn->request);
+   print_request(&cxn->request);
+   
+   // We're not supporing deflate right now.
+   cxn->response.usingDeflate = false;
+   cxn->response.noKeepAlive = cxn->request.noKeepAlive;
+   cxn->env.method = requestType2String[cxn->request.type];
+   cxn->env.query = tmp;
+
+   if (type != RESPONSE_OK) {
+      return error_response(&cxn->response, type);
+   }
+
+   if ((strstr(tmp, "/cgi-bin/"))) {
+      return cgi_request(cxn);
+   } else if (strstr(tmp, "/json/")) {
+      return json_request(cxn);
+   } else {
+      return file_request(cxn);
+   }
+}
 
 // If there was an entry for the file in the file descriptor table, then
 // it is also open and in other data structures, so remove it from them.
@@ -765,17 +761,13 @@ static int json_response(struct response* response, enum JSON_CMD cmd) {
       debug(DEBUG_INFO, "JSON: about.json\n");
       bytesWritten = sprintf(buf, "%s", BODY_JSON_ABOUT);
       break;
-   case JSON_QUIT:
-      debug(DEBUG_INFO, "JSON: quit\n");
-      bytesWritten = sprintf(buf, "%s", BODY_JSON_QUIT);
-      break;
    }
 
    response->contentLength = bytesWritten;
    make_response_header(response);
    memcpy(response->buffer + response->headerLength, buf, bytesWritten);
    response->bytesUsed += bytesWritten;
-   return cmd == JSON_QUIT ? QUIT : INTERNAL_RESPONSE;
+   return INTERNAL_RESPONSE;
 }
 
 //an error response is a response that's not the normal HTTP 200 OK
@@ -810,22 +802,7 @@ static int cgi_response(struct response* response, enum CGI_CMD cmd) {
    time_t t = time(NULL);
    int bytesWritten = 0;
 
-   switch(cmd) {
-   case CGI_BADPARAMS:
-      debug(DEBUG_INFO, "Sending Bad Params message\n");
-      bytesWritten = sprintf(buf, "Bad Params!");
-      break;
-   case CGI_GOODBYE:
-      debug(DEBUG_INFO, "Sending Goodbye message\n");
-      bytesWritten = sprintf(buf, "Goodbye!");
-      break;
-   case CGI_STATUS:
-      debug(DEBUG_INFO, "Sending CGI status message\n");
-      bytesWritten = sprintf(
-         buf, "%sServer Process ID: %d<BR>\nCurrent Time: %s%s",
-         BODY_STATUS_BEGIN, getpid(), asctime(localtime(&t)), BODY_STATUS_END);
-      break;
-   case CGI_DO:
+   if (cmd == CGI_DO) {
       debug(DEBUG_INFO, "Sending CGI response line\n");
       bytesWritten = sprintf(response->buffer, "HTTP/1.1 200 OK\r\n");
       response->bytesToWrite = response->bytesUsed =
@@ -833,14 +810,18 @@ static int cgi_response(struct response* response, enum CGI_CMD cmd) {
       return HTTP_CGI;
    }
 
+   debug(DEBUG_INFO, "Sending CGI status message\n");
+   bytesWritten = sprintf(
+      buf, "%sServer Process ID: %d<BR>\nCurrent Time: %s%s",
+      BODY_STATUS_BEGIN, getpid(), asctime(localtime(&t)), BODY_STATUS_END);
+
    response->contentLength = bytesWritten;
-   response->contentType = (cmd == CGI_BADPARAMS || cmd == CGI_GOODBYE) ?
-      "text/plain" : "text/html";
+   response->contentType = "text/html";
    response->type = RESPONSE_OK;
    make_response_header(response);
    memcpy(response->buffer + response->headerLength, buf, bytesWritten);
    response->bytesUsed += bytesWritten;
-   return cmd == CGI_GOODBYE ? QUIT : INTERNAL_RESPONSE;
+   return INTERNAL_RESPONSE;
 }
 
 static void make_response_header(struct response* response) {   
@@ -1155,12 +1136,6 @@ static enum RESPONSE_TYPE cgi_request(struct env* env, enum CGI_CMD* cmd) {
    int len, i;
    bool hasParams = false;
 
-   if (strstr(env->query + strlen("/cgi-bin/"), "quit")) {
-      *cmd = strcmp(env->query + strlen("/cgi-bin/quit"), "?confirm=1") ?
-         CGI_BADPARAMS : CGI_GOODBYE;
-      return RESPONSE_OK;
-   }
-
    if (strcmp(env->query + strlen("/cgi-bin/"), "status") == 0) {
       debug(DEBUG_INFO, "cgi status requested\n");
       *cmd = CGI_STATUS;
@@ -1183,8 +1158,7 @@ static enum RESPONSE_TYPE cgi_request(struct env* env, enum CGI_CMD* cmd) {
       return RESPONSE_INTERNAL_ERROR;
    }
 
-   memcpy(env->filepath + strlen("cgi/"),
-          env->query + strlen("/cgi-bin/"),
+   memcpy(env->filepath + strlen("cgi/"), env->query + strlen("/cgi-bin/"),
           len);
    (env->filepath + strlen("cgi/"))[len] = '\0';
    memcpy(env->filepath, "cgi/", strlen("cgi/"));
@@ -1330,12 +1304,13 @@ static void debug(uint32_t debug, const char* msg, ...) {
 
 static void clean_exit(int unused) {
    connections_t::iterator itr;
+   struct connection* cxn;
 
    fdarr_cntl(FDARR_CLEAN_UP);
    fclose(accessLog);
 
    for (itr = connections->begin(); itr != connections->end(); itr++) {
-      struct connection* cxn = itr->second;
+      cxn = itr->second;
       if (cxn) {
          if (connections->count(cxn->file)) {
             connections->at(cxn->file) = NULL;
@@ -1343,7 +1318,6 @@ static void clean_exit(int unused) {
             close(cxn->file);
          }
          close(cxn->socket);
-         debug(DEBUG_INFO, "Freeing connections struct\n");
          free(cxn);
       }
    }

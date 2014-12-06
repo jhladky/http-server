@@ -3,13 +3,11 @@
 # Modified 11/23/14 for JSON server project
 # Modified 12/05/14 for further expansion
 
-CC=gcc
 CPP=g++
-CFLAGS = -O3 -Wall -Werror -pedantic -Wextra -Wno-unused-parameter -std=c99
 CPPFLAGS = -O3 -Wall -Werror -Wextra -Wno-unused-parameter -std=c++0x
 OS = $(shell uname -s)
 PROC = $(shell uname -m)
-EXEC_SUFFIX=$(OS)-$(PROC)
+EXEC_SUFFIX = $(OS)-$(PROC)
 
 ifeq ("$(OS)", "SunOS")
 	OSLIB=-L/opt/csw/lib -R/opt/csw/lib -lsocket -lnsl
@@ -25,13 +23,6 @@ else
 	OSINC=
 	OSFLAGS=-DLINUX -D_BSD_SOURCE
 endif
-endif
-
-ifeq ("$(PROC)", "i686")
-	ARCHFLAGS=
-else
-#	ARCHFLAGS=-m32
-	ARCHFLAGS=
 endif
 
 http-server-$(EXEC_SUFFIX)-debug: http-server.cpp
