@@ -27,7 +27,7 @@
 
 ///all other defines///
 #define SERVER_PORT                 5050
-#define BUF_LEN                     1024
+#define BUF_LEN                     4096
 #define NAME_BUF_LEN                64
 #define ENV_BUF_LEN                 64
 #define FORTUNE_BUF_INIT_LEN        256
@@ -90,15 +90,13 @@ enum FDARR_CMD {
 };
 
 enum CXN_STATE {
-   ST_REQUEST_INP,
-   ST_LOAD_FILE,
+   ST_REQUEST,
    ST_INTERNAL,
    ST_CGI_FIL,
-   ST_FORTUNE_HEA,
-   ST_FORTUNE_FIL,
-   ST_RESPONSE_HEA,
-   ST_RESPONSE_FIL,
-   ST_RESPONSE_FIN
+   ST_FORTUNE_READ,
+   ST_RESPONSE_HEAD,
+   ST_RESPONSE_READ,
+   ST_RESPONSE_WRIT
 };
 
 enum REQUEST_STATE {
@@ -131,7 +129,7 @@ enum RESPONSE_TYPE {
 struct buf {
    char data[BUF_LEN];
    unsigned short bytesUsed;
-   unsigned short bytesWritten;
+   unsigned short bytesToWrite;
 };
 
 struct request {
@@ -148,14 +146,12 @@ struct request {
 };
 
 struct response {
-   char buffer[BUF_LEN];
-   unsigned int bytesUsed;
+   struct buf buffer;
    enum RESPONSE_TYPE type;
-   unsigned int contentLength;
+   int contentLength;
    unsigned int headerLength;
    const char* contentType; //get this from the file ext
-   unsigned int bytesToWrite;
-   struct buf fortuneBuf;
+   bool eofFound;
    bool noKeepAlive;
    bool usingDeflate;
 };
@@ -174,7 +170,6 @@ struct connection {
    enum CXN_STATE state;     // the current state of the connection
    int socket;               // fd of our socket
    int file;                 // fd of our file
-   char* fileBuf;            // location of the file from mmap
    struct request request;   // 
    struct response response; // 
    struct env env;           // 
@@ -187,6 +182,7 @@ static int cgi_response(struct response* response, enum CGI_CMD cmd);
 static int json_response(struct response* response, enum JSON_CMD cmd);
 static int error_response(struct response* response, enum RESPONSE_TYPE type);
 static int generate_listing(char* filepath, struct response* response);
+static int finish_response(struct connection* cxn);
 static int fdarr_cntl(enum FDARR_CMD cmd, ...);
 static int do_cgi(struct connection* cxn);
 static int do_fortune(struct connection* cxn);
@@ -204,7 +200,7 @@ static void print_request(struct request* request);
 static void close_connection(struct connection* cxn);
 static void reset_connection(struct connection* cxn);
 static void clean_exit(int unused);
-static void wait_for_child(int unused);
+//static void wait_for_child(int unused);
 static void add_handler(int signal, void (*handlerFunc)(int));
 static void log_access(struct connection* cxn);
 static void debug(uint32_t debug, const char* msg, ...);
@@ -215,7 +211,6 @@ static enum RESPONSE_TYPE parse_request_declaration(struct request* request, cha
 static enum REQUEST_STATE fill_request_buffer(int socket, char* buffer, unsigned int* bytesUsed);
 static inline const char* bool_to_string(bool b);
 static inline void set_debug_level(uintptr_t debugLevel);
-static inline void buf_init(struct buf* buf);
 static inline void pexit(const char* str);
 
 

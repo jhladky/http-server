@@ -30,10 +30,7 @@
 // Hashtable linking file descriptors (either for a socket, pipe, or file)
 // to connection structs.
 static connections_t* connections = new connections_t(500);
-// Hashtable linking pids to connection structs.
-static connections_t* pids = new connections_t(10);
-// don't like this being global
-static FILE* accessLog;
+static FILE* accessLog; // don't like this being global
 static ext_x_mime_t* ext2mime = new ext_x_mime_t({
       {"html", "text/html"},
       {"htm", "text/html"},
@@ -58,10 +55,11 @@ static const char* requestType2String[NUM_HTTP_REQUEST_TYPES] = {
    "POST",
    "DELETE"
 };
+int mySock;
 
 int main(int argc, char* argv[]) {
    struct sockaddr_in6 me;
-   int mySock, res;
+   int res;
    char v6buf[INET6_ADDRSTRLEN];
    socklen_t sockSize = sizeof(struct sockaddr_in6);
 
@@ -73,7 +71,8 @@ int main(int argc, char* argv[]) {
    debug(DEBUG_INFO, "Starting on port %d...\n", SERVER_PORT);
 
    add_handler(SIGINT, clean_exit);
-   add_handler(SIGCHLD, wait_for_child);
+   //add_handler(SIGCHLD, wait_for_child);
+   signal(SIGCHLD, SIG_IGN);
 
    if ((accessLog = fopen("access.log", "a")) == NULL) {
       pexit("fopen");
@@ -131,6 +130,7 @@ int main(int argc, char* argv[]) {
       int res, fd, revents;
 
       fdarr_cntl(FDARR_GET, &fds, &nfds);
+      //debug(DEBUG_INFO, ">>> Calling poll.\n");
       if ((res = poll(fds, nfds, -1)) == -1) {
          switch (errno) {
          case EINTR:
@@ -141,6 +141,7 @@ int main(int argc, char* argv[]) {
             exit(EXIT_FAILURE);
          }
       }
+      //debug(DEBUG_INFO, "<<< Returning from poll.\n");
 
       for (i = 0; i < nfds; i++) {
          fd = fds[i].fd;
@@ -223,83 +224,85 @@ static int process_cxsock_events(struct connection* cxn, short revents) {
       request_state_incomplete,
       request_state_finished
    };
-   int res, err = 0;
+   struct buf* buf;
+   enum CXN_STATE ps, ns;
+   int res;
    char* ptr;
 
-   if (revents & POLLIN && cxn->state == ST_REQUEST_INP) {
-      debug(DEBUG_INFO, "cxsock, revent: POLLIN, state: ST_REQUEST_INP\n");
+   ps = cxn->state;
+   ns = ps;
+   
+   if (revents & POLLIN && ps == ST_REQUEST) {
+      debug(DEBUG_INFO, "cxsock, revent: POLLIN, state: ST_REQUEST\n");
       return frbActions[fill_request_buffer(cxn->socket,
                                             cxn->request.buffer,
                                             &cxn->request.bytesUsed)](cxn);
-   } else if (revents & POLLOUT && cxn->state == ST_INTERNAL) {
+   } else if (revents & POLLOUT && ps == ST_INTERNAL) {
       debug(DEBUG_INFO, "cxsock, revent: POLLOUT, state: ST_INTERNAL\n");
 
+      buf = &cxn->response.buffer;
+      ptr = buf->data + (buf->bytesUsed - buf->bytesToWrite);
       // In this state the request buffer (with HTTP headers) has been
       // prepared by error_response, or cgi_response, or json_response.
       // We send it, and we're done. The exception is for a normal CGI
       // response where we then have to fork.
-      if ((res = write(cxn->socket,
-                       cxn->response.buffer,
-                       cxn->response.bytesToWrite)) == -1) {
-
+      if ((res = write(cxn->socket, ptr, buf->bytesToWrite)) == -1) {
          // If there is an error from write, close the connection.
          // We'll never send a 500 Internal Error (since we can't
          // write on the socket!) but we mark set noKeepAlive
          // so the connection gets closed.
          debug(DEBUG_WARNING, "write: %s\n", strerror(errno));
          cxn->request.noKeepAlive = true;
-         cxn->state = ST_RESPONSE_FIN;
+         return finish_response(cxn);
+      } else if (buf->bytesToWrite - res == 0) {
+         if (!(cxn->opts & CXN_CGI)) {
+            return finish_response(cxn);
+         } else {
+            ns = ST_CGI_FIL;
+         }
+      } else {
+         buf->bytesToWrite -= res;
+         ns = ps;
       }
-
-      cxn->state = (cxn->opts & CXN_CGI) ? ST_CGI_FIL : ST_RESPONSE_FIN;
-   } else if (revents & POLLOUT && cxn->state == ST_RESPONSE_HEA) {
-      debug(DEBUG_INFO, "cxsock, revent: POLLOUT, state: ST_RESPONSE_HEA\n");
+   } else if (revents & POLLOUT && ps == ST_RESPONSE_HEAD) {
+      debug(DEBUG_INFO, "cxsock, revent: POLLOUT, state: ST_RESPONSE_HEAD\n");
 
       // Write the header
-      if ((res = write(cxn->socket,
-                       cxn->response.buffer,
-                       cxn->response.headerLength)) == -1) {
+      buf = &cxn->response.buffer;
+      ptr = buf->data + (buf->bytesUsed - buf->bytesToWrite);
+      if ((res = write(cxn->socket, ptr, buf->bytesToWrite)) == -1) {
          debug(DEBUG_WARNING, "write: %s\n", strerror(errno));
          cxn->request.noKeepAlive = true;
-         cxn->state = ST_RESPONSE_FIN;
+         return finish_response(cxn);
+      } else if (buf->bytesToWrite - res == 0) {
+         // If we are finished writing the header, then remove the socket
+         // from the pollfd array until data is available on the pipe
+         fdarr_cntl(FDARR_MODIFY, cxn->socket, 0);
+         ns = (cxn->opts & CXN_FORTUNE) ? ST_FORTUNE_READ : ST_RESPONSE_READ;
       } else {
-         cxn->response.bytesToWrite -= res;
-         cxn->state = ST_RESPONSE_FIL;
+         buf->bytesToWrite -= res;
+         ns = ps;
       }
-   } else if (revents & POLLOUT && cxn->state == ST_RESPONSE_FIL) {
-      debug(DEBUG_INFO, "cxsock, revent: POLLOUT, state: RESPONSE_FIL\n");
+   } else if (revents & POLLOUT && ps == ST_RESPONSE_WRIT) {
+      debug(DEBUG_INFO, "cxsock, revent: POLLOUT, state: ST_RESPONSE_WRIT\n");
 
-      // Write as much of the file out as we can.
-      ptr = cxn->fileBuf + cxn->response.contentLength -
-         cxn->response.bytesToWrite;
-      res = write(cxn->socket, ptr, cxn->response.bytesToWrite);
-
-      if (res == -1) {
-         cxn->response.type = RESPONSE_INTERNAL_ERROR;
-         cxn->state = ST_RESPONSE_FIN;
-      } else {
-         cxn->response.bytesToWrite -= res;
-         // If there are still bytes to write, then wait for the file to become
-         // available for reading. Otherwise we are done with the file
-         // and the request.
-         cxn->state =
-            cxn->response.bytesToWrite ? ST_LOAD_FILE : ST_RESPONSE_FIN;
-      }
-   } else if (revents & POLLOUT && cxn->state == ST_FORTUNE_FIL) {
-      debug(DEBUG_INFO, "cxsock, revent: POLLOUT, state: ST_FORTUNE_FIL\n");
-
-      if ((res = write(cxn->socket,
-                       cxn->response.buffer,
-                       cxn->response.bytesToWrite)) == -1) {
+      buf = &cxn->response.buffer;
+      ptr = buf->data + (buf->bytesUsed - buf->bytesToWrite);
+      if ((res = write(cxn->socket, ptr, buf->bytesToWrite)) == -1) {
          debug(DEBUG_WARNING, "write: %s\n", strerror(errno));
          cxn->response.type = RESPONSE_INTERNAL_ERROR;
-         cxn->state = ST_RESPONSE_FIN;
+         return finish_response(cxn);
+      } else if (buf->bytesToWrite - res == 0 && cxn->response.eofFound) {
+         return finish_response(cxn);
+      } else if (buf->bytesToWrite - res == 0) {
+         fdarr_cntl(FDARR_MODIFY, cxn->socket, 0);
+         fdarr_cntl(FDARR_MODIFY, cxn->file, POLLIN);
+         ns = (cxn->opts & CXN_FORTUNE) ? ST_FORTUNE_READ : ST_RESPONSE_READ;
       } else {
-         cxn->response.bytesToWrite -= res;
-         cxn->state = cxn->response.bytesToWrite ? ST_FORTUNE_FIL :
-            ST_RESPONSE_FIN;
+         buf->bytesToWrite -= res;
+         cxn->state = ps;
       }
-   } else if (revents & POLLOUT && cxn->state == ST_CGI_FIL) {
+   } else if (revents & POLLOUT && ps == ST_CGI_FIL) {
       debug(DEBUG_INFO, "cxsock, revent: POLLOUT, state: ST_CGI_FIL\n");
 
       if (do_cgi(cxn) == POSIX_ERROR) {
@@ -311,95 +314,66 @@ static int process_cxsock_events(struct connection* cxn, short revents) {
          error_response(&cxn->response, RESPONSE_INTERNAL_ERROR);
          cxn->opts &= ~CXN_CGI;
          cxn->state = ST_INTERNAL;
-         err = process_cxsock_events(cxn, POLLOUT);
+         return process_cxsock_events(cxn, POLLOUT);
       } else {
-         // In a normal CGI response once we've forked we want to
-         // finish the response, so we call ourselves to immediately
-         // go to the 'end response' state.
-         cxn->state = ST_RESPONSE_FIN;
-         err = process_cxsock_events(cxn, POLLOUT);
+         cxn->response.noKeepAlive = true;
+         return finish_response(cxn);
       }
-   } else if (revents & POLLOUT && cxn->state == ST_RESPONSE_FIN) {
-      debug(DEBUG_INFO, "cxsock, revent: POLLOUT, state: ST_RESPONSE_FIN\n");
-
-      log_access(cxn);
-
-      // This shouldn't actually be a state here, because
-      // we don't have to wait on any file descriptors to get to it
-      if (cxn->request.noKeepAlive) {
-         debug(DEBUG_INFO, "`Connection: close` specified\n");
-         close_connection(cxn);
-      } else {
-         reset_connection(cxn);
-      }
-      err = FDARR_MODIFIED;
    } else if (revents & POLLHUP || revents & POLLERR || revents & POLLNVAL) {
       debug(DEBUG_INFO, "cxsock, revent: POLLHUP/POLLERR/POLLNVAL\n");
-      close_connection(cxn);
-      err = FDARR_MODIFIED;
+      cxn->request.noKeepAlive = true;
+      return finish_response(cxn);
    } else {
       debug(DEBUG_INFO, "cxsock, revent: unknown, %08X, state: N/A\n", revents);
    }
 
-   return err;
+   cxn->state = ns;
+   return 0;
 }
 
 static int process_cxfile_events(struct connection* cxn, short revents) {
-   struct buf* fb;
+   struct buf* buf;
    int res, err = 0;
 
-   if (revents & POLLIN && cxn->state == ST_LOAD_FILE) {
-      debug(DEBUG_INFO, "cxfile, revent: POLLIN, state: ST_LOAD_FILE\n");
-      cxn->state = ST_RESPONSE_FIL;
-   } else if (revents & POLLIN && cxn->state == ST_FORTUNE_HEA) {
-      debug(DEBUG_INFO, "cxfile, revent: POLLIN, state: ST_FORTUNE_HEA\n");
-
-      fb = &cxn->response.fortuneBuf;
-
-      // If res is -1 then we have a read error, so return a 500. If it is
-      // 0, or if it is less than the number of bytes requested, then we have
-      // reached EOF and need to send the fortune. If it is equal to number of
-      // bytes requested then enlarge the buffer and stay in this state.
-      if ((res = read(cxn->file, fb->data, BUF_LEN - fb->bytesUsed)) == -1) {
+   if (revents & POLLIN && cxn->state == ST_RESPONSE_READ) {
+      debug(DEBUG_INFO, "cxfile, revent: POLLIN, state: ST_RESPONSE_READ\n");
+      
+      buf = &cxn->response.buffer;
+      if ((res = read(cxn->file, buf->data, BUF_LEN)) == -1) {
+         debug(DEBUG_WARNING, "read: %s\n", strerror(errno));
          error_response(&cxn->response, RESPONSE_INTERNAL_ERROR);
          cxn->state = ST_INTERNAL;
-      } else if (res == 0 || res < BUF_LEN - fb->bytesUsed) {
-         fb->bytesUsed += res;
-         if (fortune_decode(fb) == POSIX_ERROR) {
-            error_response(&cxn->response, RESPONSE_INTERNAL_ERROR);
-            cxn->state = ST_INTERNAL;
-            return 0; //should return at the bottom...
-         }
-         cxn->response.contentLength =
-            fb->bytesUsed +
-            strlen(BODY_FORTUNE_BEGIN) +
-            strlen(BODY_FORTUNE_END);
-         cxn->response.contentType = "application/json";
-         make_response_header(&cxn->response);
+         return 0;
+      }
 
-         // Copy the fortune json into the buffer
-         memcpy(cxn->response.buffer + cxn->response.bytesUsed,
-                BODY_FORTUNE_BEGIN, strlen(BODY_FORTUNE_BEGIN));
-         cxn->response.bytesUsed += strlen(BODY_FORTUNE_BEGIN);
-         memcpy(cxn->response.buffer + cxn->response.bytesUsed,
-                fb->data, fb->bytesUsed);
-         cxn->response.bytesUsed += fb->bytesUsed;
-         memcpy(cxn->response.buffer + cxn->response.bytesUsed,
-                BODY_FORTUNE_END, strlen(BODY_FORTUNE_END));
-         cxn->response.bytesUsed += strlen(BODY_FORTUNE_END);
+      if (res == 0 || revents & POLLHUP) {
+         cxn->response.eofFound = true;
+      }
 
-         cxn->response.bytesToWrite = cxn->response.bytesUsed;
-         // Close the pipe for reading, as we have copied everything out
-         // of it. Also remove the reference to the pipe in the
-         // connections table and the and the fdarr, and  zero out the fd.
-         connections->erase(cxn->file);
-         close(cxn->file);
-         fdarr_cntl(FDARR_REMOVE, cxn->file);
-         cxn->file = 0;
-         cxn->state = ST_FORTUNE_FIL;
+      fdarr_cntl(FDARR_MODIFY, cxn->socket, POLLOUT);
+      buf->bytesUsed = buf->bytesToWrite = res;
+      cxn->state = ST_RESPONSE_WRIT;
+   } else if (revents & POLLIN && cxn->state == ST_FORTUNE_READ) {
+      debug(DEBUG_INFO, "cxfile, revent: POLLIN, state: ST_FORTUNE_READ\n");
+      buf = &cxn->response.buffer;
+      if ((res = read(cxn->file, buf->data, BUF_LEN * 0.9)) == -1) {
+         debug(DEBUG_WARNING, "read: %s\n", strerror(errno));
+         error_response(&cxn->response, RESPONSE_INTERNAL_ERROR);
+         cxn->state = ST_INTERNAL;
+         return 0;
+      }
+
+      if (res == 0 || revents & POLLHUP) {
+         cxn->response.eofFound = true;
+      }
+
+      fdarr_cntl(FDARR_MODIFY, cxn->socket, POLLOUT);
+      buf->bytesUsed = buf->bytesToWrite = res;
+      if (fortune_decode(buf) == POSIX_ERROR) {
+         error_response(&cxn->response, RESPONSE_INTERNAL_ERROR);
+         cxn->state = ST_INTERNAL;
       } else {
-         printf("I WAS HOPING I WOULD GET A SHORT FORTUNE\n");
-         clean_exit(0);
+         cxn->state = ST_RESPONSE_WRIT;
       }
    } else {
       debug(DEBUG_WARNING, "cxfile, revent: unknown %08X, state: N/A\n",
@@ -437,13 +411,16 @@ static int request_state_finished(struct connection* cxn) {
       if (do_fortune(cxn) == POSIX_ERROR) {
          error_response(&cxn->response, RESPONSE_INTERNAL_ERROR);
          cxn->state = ST_INTERNAL;
+         return 0;
       }
-      // Once we have forked the fortune process, we don't want any more
-      // events to trigger on this connection until the child exits.
-      // This way the pipe buffer will be complete and we can write it out
-      // in one go.
-      fdarr_cntl(FDARR_MODIFY, cxn->socket, 0);
-      return 0;
+
+      cxn->response.contentType = "application/json";
+      // Set the contentLength to -1 to indicate we're not
+      // providing this field for this response.
+      cxn->response.contentLength = -1;
+      make_response_header(&cxn->response);
+      cxn->state = ST_RESPONSE_HEAD;
+      return FDARR_MODIFIED;
    case HTTP_CGI:
       cxn->opts |= CXN_CGI;
       cxn->state = ST_INTERNAL;
@@ -453,17 +430,7 @@ static int request_state_finished(struct connection* cxn) {
       return 0;
    }
 
-   cxn->fileBuf = (char *) mmap(NULL, cxn->response.contentLength,
-                                PROT_READ, MAP_PRIVATE, cxn->file, 0);
-   if ((intptr_t) cxn->fileBuf == -1) {
-      debug(DEBUG_WARNING, "mmap: %s\n", strerror(errno));
-      cxn->state = ST_INTERNAL;
-      close(cxn->file);
-      error_response(&cxn->response, RESPONSE_INTERNAL_ERROR);
-      return 0;
-   }
-
-   cxn->state = ST_RESPONSE_HEA;
+   cxn->state = ST_RESPONSE_HEAD;
    fdarr_cntl(FDARR_ADD, cxn->file, POLLIN);
    connections->insert(std::make_pair(cxn->file, cxn));
    ptr = strrchr(cxn->request.filepath, '.');
@@ -473,6 +440,18 @@ static int request_state_finished(struct connection* cxn) {
    }
 
    make_response_header(&cxn->response);
+   return FDARR_MODIFIED;
+}
+
+static int finish_response(struct connection* cxn) {
+   log_access(cxn);
+   if (cxn->request.noKeepAlive || cxn->response.contentLength == -1 ||
+       cxn->response.type == RESPONSE_INTERNAL_ERROR) {
+      debug(DEBUG_INFO, "`Connection: close` specified\n");
+      close_connection(cxn);
+   } else {
+      reset_connection(cxn);
+   }
    return FDARR_MODIFIED;
 }
 
@@ -495,7 +474,7 @@ static int json_request(struct connection* cxn) {
    enum JSON_CMD cmd;
    char* str = cxn->env.query + strlen("/json/");
 
-   debug(DEBUG_INFO, "json request: %s\n", cxn->env.query);
+   debug(DEBUG_INFO, "json request: >%s<\n", cxn->env.query);
 
    if (strcmp(cxn->env.query, "/json/") == 0) {
       return error_response(&cxn->response, RESPONSE_NOT_FOUND);
@@ -509,6 +488,7 @@ static int json_request(struct connection* cxn) {
       debug(DEBUG_WARNING, "Unsupported JSON operation requested: %s\n", str);
       return error_response(&cxn->response, RESPONSE_NOT_FOUND);
    }
+   
 
    debug(DEBUG_INFO, "Doing some JSON action.\n");
    return json_response(&cxn->response, cmd);
@@ -604,7 +584,6 @@ static void reset_connection(struct connection* cxn) {
    if (connections->erase(cxn->file)) {
       fdarr_cntl(FDARR_REMOVE, cxn->file);
       close(cxn->file);
-      munmap(cxn->fileBuf, cxn->response.contentLength);
    }
    memset(cxn, 0, sizeof(struct connection));
    cxn->socket = socket;
@@ -617,7 +596,6 @@ static void close_connection(struct connection* cxn) {
    if (connections->erase(cxn->file)) {
       fdarr_cntl(FDARR_REMOVE, cxn->file);
       close(cxn->file);
-      munmap(cxn->fileBuf, cxn->response.contentLength);
    }
    close(cxn->socket);
    connections->erase(cxn->socket);
@@ -750,8 +728,9 @@ static int json_response(struct response* response, enum JSON_CMD cmd) {
 
    response->contentLength = bytesWritten;
    make_response_header(response);
-   memcpy(response->buffer + response->headerLength, buf, bytesWritten);
-   response->bytesUsed += bytesWritten;
+   memcpy(response->buffer.data + response->headerLength, buf, bytesWritten);
+   response->buffer.bytesUsed += bytesWritten;
+   response->buffer.bytesToWrite = response->buffer.bytesUsed;
    return INTERNAL_RESPONSE;
 }
 
@@ -777,8 +756,9 @@ static int error_response(struct response* response, enum RESPONSE_TYPE type) {
    response->contentType = "text/html";
    response->type = type;
    make_response_header(response);
-   memcpy(response->buffer + response->headerLength, buf, bytesWritten);
-   response->bytesUsed += bytesWritten;
+   memcpy(response->buffer.data + response->headerLength, buf, bytesWritten);
+   response->buffer.bytesUsed += bytesWritten;
+   response->buffer.bytesToWrite = response->buffer.bytesUsed;
    return INTERNAL_RESPONSE;
 }
 
@@ -789,8 +769,8 @@ static int cgi_response(struct response* response, enum CGI_CMD cmd) {
 
    if (cmd == CGI_DO) {
       debug(DEBUG_INFO, "Sending CGI response line\n");
-      bytesWritten = sprintf(response->buffer, "HTTP/1.1 200 OK\r\n");
-      response->bytesToWrite = response->bytesUsed =
+      bytesWritten = snprintf(response->buffer.data, BUF_LEN, "HTTP/1.1 200 OK\r\n");
+      response->buffer.bytesToWrite = response->buffer.bytesUsed =
          response->headerLength = bytesWritten;
       return HTTP_CGI;
    }
@@ -804,34 +784,36 @@ static int cgi_response(struct response* response, enum CGI_CMD cmd) {
    response->contentType = "text/html";
    response->type = RESPONSE_OK;
    make_response_header(response);
-   memcpy(response->buffer + response->headerLength, buf, bytesWritten);
-   response->bytesUsed += bytesWritten;
+   memcpy(response->buffer.data + response->headerLength, buf, bytesWritten);
+   response->buffer.bytesUsed += bytesWritten;
+   response->buffer.bytesToWrite = response->buffer.bytesUsed;
    return INTERNAL_RESPONSE;
 }
 
 static void make_response_header(struct response* response) {
+   struct buf* buf = &response->buffer;
    int written;
 
-   written = snprintf(response->buffer, BUF_LEN, "HTTP/1.1 %s\r\n",
+   written = snprintf(buf->data, BUF_LEN, "HTTP/1.1 %s\r\n",
                       responseType2String[response->type]);
 
    if (response->contentType) {
-      written += snprintf(response->buffer + written, BUF_LEN - written,
+      written += snprintf(buf->data + written, BUF_LEN - written,
                           "Content-Type: %s\r\n", response->contentType);
    }
 
    if (response->noKeepAlive) {
-      written += snprintf(response->buffer + written, BUF_LEN - written,
+      written += snprintf(buf->data + written, BUF_LEN - written,
                           "Connection: Close\r\n");
    }
 
-   written += snprintf(response->buffer + written,
-                       BUF_LEN - written,
-                       "Content-Length: %d\r\n\r\n",
-                       response->contentLength);
+   if (response->contentLength >= 0) {
+      written += snprintf(buf->data + written, BUF_LEN - written,
+                          "Content-Length: %d\r\n", response->contentLength);
+   }
 
-   response->bytesUsed = response->headerLength = written;
-   response->bytesToWrite = response->headerLength + response->contentLength;
+   written += snprintf(buf->data + written, BUF_LEN - written, "\r\n");
+   buf->bytesUsed = buf->bytesToWrite = response->headerLength = written;
 }
 
 static int generate_listing(char* filepath, struct response* response) {
@@ -885,8 +867,9 @@ static int generate_listing(char* filepath, struct response* response) {
    response->contentLength = bytesWritten;
 
    make_response_header(response);
-   memcpy(response->buffer + response->headerLength, buf, bytesWritten);
-   response->bytesUsed += bytesWritten;
+   memcpy(response->buffer.data + response->headerLength, buf, bytesWritten);
+   response->buffer.bytesUsed += bytesWritten;
+   response->buffer.bytesToWrite = response->buffer.bytesUsed;
 
    free(str);
    free(buf);
@@ -1040,9 +1023,10 @@ static int fortune_decode(struct buf* buf) {
       *bufPtr++ = *tmpPtr++;
    }
    buf->bytesUsed += extra;
+   buf->bytesToWrite = buf->bytesUsed;
    free(tmp);
 
-   if (extra >= BUF_LEN - buf->bytesUsed) {
+   if (buf->bytesUsed >= BUF_LEN) {
       debug(DEBUG_WARNING, "Buffer overflow in fortune_decode\n");
       return POSIX_ERROR;
    }
@@ -1225,10 +1209,11 @@ static int do_fortune(struct connection* cxn) {
 
       // Close the write pipe
       close(fortunePipe[1]);
-      //make the read pipe non blocking
+      // Make the read pipe non blocking.
       fcntl(cxn->file, F_SETFL, fcntl(cxn->file, F_GETFL) & ~O_NONBLOCK);
+      // Add the read pipe to the fdarr.
+      fdarr_cntl(FDARR_ADD, cxn->file, POLLIN);
       connections->insert(std::make_pair(cxn->file, cxn));
-      pids->insert(std::make_pair(cxn->env.childPid, cxn));
    }
    return 0;
 }
@@ -1297,7 +1282,6 @@ static void clean_exit(int unused) {
       if (cxn) {
          if (connections->count(cxn->file)) {
             connections->at(cxn->file) = NULL;
-            munmap(cxn->fileBuf, cxn->response.contentLength);
             close(cxn->file);
          }
          close(cxn->socket);
@@ -1305,42 +1289,25 @@ static void clean_exit(int unused) {
       }
    }
    delete connections;
-   delete pids;
    delete ext2mime;
-   printf("Server exiting cleanly.\n");
+   close(mySock);
+   debug(DEBUG_INFO, "Exiting cleanly.\n");
    exit(EXIT_SUCCESS);
 }
 
-static void wait_for_child(int unused) {
-   struct connection* cxn;
+/*static void wait_for_child(int unused) {
    int childStatus, pid;
 
-   debug(DEBUG_INFO, "Child signal received\n");
-
+   debug(DEBUG_INFO, ">>>>>>>>called.\n");
+   
    if ((pid = waitpid(0, &childStatus, WNOHANG)) == -1) {
       debug(DEBUG_WARNING, "wait: %s\n", strerror(errno));
    } else if (pid == 0) {
       debug(DEBUG_WARNING, "0 return from wait!\n");
    } else if (WIFEXITED(childStatus)) {
-      debug(DEBUG_INFO, "child with pid %d exits\n", pid);
-      if (pids->count(pid)) {
-         cxn = pids->at(pid);
-
-         // Add the fds for the socket and the pipe back to poll.
-         // We next want to deal with the fortune connection
-         // when we can read the data in the pipe buffer,
-         // i.e. a POLLIN event on cxn->file
-         fdarr_cntl(FDARR_MODIFY, cxn->socket, POLLOUT);
-         fdarr_cntl(FDARR_ADD, cxn->file, POLLIN);
-         cxn->state = ST_FORTUNE_HEA;
-         buf_init(&cxn->response.fortuneBuf);
-      }
+      debug(DEBUG_INFO, "Child with pid %d exits.\n", pid);
    }
-}
-
-static inline void buf_init(struct buf* buf) {
-   buf->bytesUsed = 0;
-}
+   }*/
 
 //sets up a signal handler
 static void add_handler(int signal, void (*handlerFunc)(int)) {
@@ -1355,6 +1322,6 @@ static void add_handler(int signal, void (*handlerFunc)(int)) {
 }
 
 static inline void pexit(const char* str) {
-   debug(DEBUG_ERROR, "POSIX %s: %s\n", str, strerror(errno));
+   debug(DEBUG_ERROR, "%s: %s\n", str, strerror(errno));
    exit(EXIT_FAILURE);
 }
