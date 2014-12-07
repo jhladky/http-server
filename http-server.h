@@ -93,7 +93,6 @@ enum CXN_STATE {
    ST_REQUEST,
    ST_INTERNAL,
    ST_CGI_FIL,
-   ST_RESPONSE_HEAD,
    ST_RESPONSE_READ,
    ST_RESPONSE_WRIT
 };
@@ -197,7 +196,6 @@ static void make_response_header(struct response* response);
 static void print_request(struct request* request);
 static int finish_response(struct connection* cxn, bool keepAlive);
 static void clean_exit(int unused);
-//static void wait_for_child(int unused);
 static void add_handler(int signal, void (*handlerFunc)(int));
 static void log_access(struct connection* cxn);
 static void debug(uint32_t debug, const char* msg, ...);

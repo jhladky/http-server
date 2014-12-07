@@ -71,7 +71,6 @@ int main(int argc, char* argv[]) {
    debug(DEBUG_INFO, "Starting on port %d...\n", SERVER_PORT);
 
    add_handler(SIGINT, clean_exit);
-   //add_handler(SIGCHLD, wait_for_child);
    signal(SIGCHLD, SIG_IGN);
 
    if ((accessLog = fopen("access.log", "a")) == NULL) {
@@ -262,24 +261,6 @@ static int process_cxsock_events(struct connection* cxn, short revents) {
          buf->bytesToWrite -= res;
          ns = ps;
       }
-   } else if (revents & POLLOUT && ps == ST_RESPONSE_HEAD) {
-      debug(DEBUG_INFO, "cxsock, revent: POLLOUT, state: ST_RESPONSE_HEAD\n");
-
-      // Write the header
-      buf = &cxn->response.buffer;
-      ptr = buf->data + (buf->bytesUsed - buf->bytesToWrite);
-      if ((res = write(cxn->socket, ptr, buf->bytesToWrite)) == -1) {
-         debug(DEBUG_WARNING, "write: %s\n", strerror(errno));
-         return finish_response(cxn, false);
-      } else if (buf->bytesToWrite - res == 0) {
-         // If we are finished writing the header, then remove the socket
-         // from the pollfd array until data is available on the pipe
-         fdarr_cntl(FDARR_MODIFY, cxn->socket, 0);
-         ns = ST_RESPONSE_READ;
-      } else {
-         buf->bytesToWrite -= res;
-         ns = ps;
-      }
    } else if (revents & POLLOUT && ps == ST_RESPONSE_WRIT) {
       debug(DEBUG_INFO, "cxsock, revent: POLLOUT, state: ST_RESPONSE_WRIT\n");
 
@@ -395,7 +376,8 @@ static int request_state_finished(struct connection* cxn) {
       // providing this field for this response.
       cxn->response.contentLength = -1;
       make_response_header(&cxn->response);
-      cxn->state = ST_RESPONSE_HEAD;
+      //cxn->state = ST_RESPONSE_HEAD;
+      cxn->state = ST_RESPONSE_WRIT;
       return FDARR_MODIFIED;
    case HTTP_CGI:
       cxn->opts |= CXN_CGI;
@@ -406,7 +388,8 @@ static int request_state_finished(struct connection* cxn) {
       return 0;
    }
 
-   cxn->state = ST_RESPONSE_HEAD;
+   //cxn->state = ST_RESPONSE_HEAD;
+   cxn->state = ST_RESPONSE_WRIT;
    fdarr_cntl(FDARR_ADD, cxn->file, POLLIN);
    connections->insert(std::make_pair(cxn->file, cxn));
    ptr = strrchr(cxn->request.filepath, '.');
@@ -1251,20 +1234,6 @@ static void clean_exit(int unused) {
    debug(DEBUG_INFO, "Exiting cleanly.\n");
    exit(EXIT_SUCCESS);
 }
-
-/*static void wait_for_child(int unused) {
-   int childStatus, pid;
-
-   debug(DEBUG_INFO, ">>>>>>>>called.\n");
-   
-   if ((pid = waitpid(0, &childStatus, WNOHANG)) == -1) {
-      debug(DEBUG_WARNING, "wait: %s\n", strerror(errno));
-   } else if (pid == 0) {
-      debug(DEBUG_WARNING, "0 return from wait!\n");
-   } else if (WIFEXITED(childStatus)) {
-      debug(DEBUG_INFO, "Child with pid %d exits.\n", pid);
-   }
-   }*/
 
 //sets up a signal handler
 static void add_handler(int signal, void (*handlerFunc)(int)) {
