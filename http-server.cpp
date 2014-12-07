@@ -248,15 +248,13 @@ static int process_cxsock_events(struct connection* cxn, short revents) {
       // response where we then have to fork.
       if ((res = write(cxn->socket, ptr, buf->bytesToWrite)) == -1) {
          // If there is an error from write, close the connection.
-         // We'll never send a 500 Internal Error (since we can't
-         // write on the socket!) but we mark set noKeepAlive
-         // so the connection gets closed.
+         // We can't even send a `500 Internal Error` since we can't
+         // write on the socket.
          debug(DEBUG_WARNING, "write: %s\n", strerror(errno));
-         cxn->request.noKeepAlive = true;
-         return finish_response(cxn);
+         return finish_response(cxn, false);
       } else if (buf->bytesToWrite - res == 0) {
          if (!(cxn->opts & CXN_CGI)) {
-            return finish_response(cxn);
+            return finish_response(cxn, false); // Fix this
          } else {
             ns = ST_CGI_FIL;
          }
@@ -272,13 +270,12 @@ static int process_cxsock_events(struct connection* cxn, short revents) {
       ptr = buf->data + (buf->bytesUsed - buf->bytesToWrite);
       if ((res = write(cxn->socket, ptr, buf->bytesToWrite)) == -1) {
          debug(DEBUG_WARNING, "write: %s\n", strerror(errno));
-         cxn->request.noKeepAlive = true;
-         return finish_response(cxn);
+         return finish_response(cxn, false);
       } else if (buf->bytesToWrite - res == 0) {
          // If we are finished writing the header, then remove the socket
          // from the pollfd array until data is available on the pipe
          fdarr_cntl(FDARR_MODIFY, cxn->socket, 0);
-         ns = (cxn->opts & CXN_FORTUNE) ? ST_FORTUNE_READ : ST_RESPONSE_READ;
+         ns = ST_RESPONSE_READ;
       } else {
          buf->bytesToWrite -= res;
          ns = ps;
@@ -290,14 +287,13 @@ static int process_cxsock_events(struct connection* cxn, short revents) {
       ptr = buf->data + (buf->bytesUsed - buf->bytesToWrite);
       if ((res = write(cxn->socket, ptr, buf->bytesToWrite)) == -1) {
          debug(DEBUG_WARNING, "write: %s\n", strerror(errno));
-         cxn->response.type = RESPONSE_INTERNAL_ERROR;
-         return finish_response(cxn);
+         return finish_response(cxn, false);
       } else if (buf->bytesToWrite - res == 0 && cxn->response.eofFound) {
-         return finish_response(cxn);
+         return finish_response(cxn, false);
       } else if (buf->bytesToWrite - res == 0) {
          fdarr_cntl(FDARR_MODIFY, cxn->socket, 0);
          fdarr_cntl(FDARR_MODIFY, cxn->file, POLLIN);
-         ns = (cxn->opts & CXN_FORTUNE) ? ST_FORTUNE_READ : ST_RESPONSE_READ;
+         ns = ST_RESPONSE_READ;
       } else {
          buf->bytesToWrite -= res;
          cxn->state = ps;
@@ -316,13 +312,11 @@ static int process_cxsock_events(struct connection* cxn, short revents) {
          cxn->state = ST_INTERNAL;
          return process_cxsock_events(cxn, POLLOUT);
       } else {
-         cxn->response.noKeepAlive = true;
-         return finish_response(cxn);
+         return finish_response(cxn, false);
       }
    } else if (revents & POLLHUP || revents & POLLERR || revents & POLLNVAL) {
       debug(DEBUG_INFO, "cxsock, revent: POLLHUP/POLLERR/POLLNVAL\n");
-      cxn->request.noKeepAlive = true;
-      return finish_response(cxn);
+      return finish_response(cxn, false);
    } else {
       debug(DEBUG_INFO, "cxsock, revent: unknown, %08X, state: N/A\n", revents);
    }
@@ -333,59 +327,41 @@ static int process_cxsock_events(struct connection* cxn, short revents) {
 
 static int process_cxfile_events(struct connection* cxn, short revents) {
    struct buf* buf;
-   int res, err = 0;
+   int res, readAmt, err = 0;
 
    if (revents & POLLIN && cxn->state == ST_RESPONSE_READ) {
       debug(DEBUG_INFO, "cxfile, revent: POLLIN, state: ST_RESPONSE_READ\n");
       
       buf = &cxn->response.buffer;
-      if ((res = read(cxn->file, buf->data, BUF_LEN)) == -1) {
+      // Find a better way of doing this later
+      readAmt = cxn->opts & CXN_FORTUNE ? 0.9 * BUF_LEN : BUF_LEN;
+      if ((res = read(cxn->file, buf->data, readAmt)) == -1) {
          debug(DEBUG_WARNING, "read: %s\n", strerror(errno));
          error_response(&cxn->response, RESPONSE_INTERNAL_ERROR);
          cxn->state = ST_INTERNAL;
          return 0;
       }
 
-      if (res == 0 || revents & POLLHUP) {
-         cxn->response.eofFound = true;
-      }
-
+      cxn->response.eofFound = res == 0 || revents & POLLHUP;
       fdarr_cntl(FDARR_MODIFY, cxn->socket, POLLOUT);
       buf->bytesUsed = buf->bytesToWrite = res;
       cxn->state = ST_RESPONSE_WRIT;
-   } else if (revents & POLLIN && cxn->state == ST_FORTUNE_READ) {
-      debug(DEBUG_INFO, "cxfile, revent: POLLIN, state: ST_FORTUNE_READ\n");
-      buf = &cxn->response.buffer;
-      if ((res = read(cxn->file, buf->data, BUF_LEN * 0.9)) == -1) {
-         debug(DEBUG_WARNING, "read: %s\n", strerror(errno));
+
+      if (cxn->opts & CXN_FORTUNE && fortune_decode(buf) == POSIX_ERROR) {
          error_response(&cxn->response, RESPONSE_INTERNAL_ERROR);
          cxn->state = ST_INTERNAL;
-         return 0;
-      }
-
-      if (res == 0 || revents & POLLHUP) {
-         cxn->response.eofFound = true;
-      }
-
-      fdarr_cntl(FDARR_MODIFY, cxn->socket, POLLOUT);
-      buf->bytesUsed = buf->bytesToWrite = res;
-      if (fortune_decode(buf) == POSIX_ERROR) {
-         error_response(&cxn->response, RESPONSE_INTERNAL_ERROR);
-         cxn->state = ST_INTERNAL;
-      } else {
-         cxn->state = ST_RESPONSE_WRIT;
       }
    } else {
       debug(DEBUG_WARNING, "cxfile, revent: unknown %08X, state: N/A\n",
             revents);
    }
-
+   
    return err;
 }
 
 static int request_state_zero_read(struct connection* cxn) {
    debug(DEBUG_INFO, "Zero read, closing connection\n");
-   close_connection(cxn);
+   finish_response(cxn, false);
    return FDARR_MODIFIED;
 }
 
@@ -443,15 +419,31 @@ static int request_state_finished(struct connection* cxn) {
    return FDARR_MODIFIED;
 }
 
-static int finish_response(struct connection* cxn) {
+static int finish_response(struct connection* cxn, bool keepAlive) {
+   int socket;
+   struct env env;
+
    log_access(cxn);
-   if (cxn->request.noKeepAlive || cxn->response.contentLength == -1 ||
-       cxn->response.type == RESPONSE_INTERNAL_ERROR) {
-      debug(DEBUG_INFO, "`Connection: close` specified\n");
-      close_connection(cxn);
-   } else {
-      reset_connection(cxn);
+
+   if (connections->erase(cxn->file)) {
+      fdarr_cntl(FDARR_REMOVE, cxn->file);
+      close(cxn->file);
    }
+   
+   if (keepAlive) {
+      socket = cxn->socket;
+      env = cxn->env;
+      fdarr_cntl(FDARR_MODIFY, cxn->socket, POLLIN);  
+      memset(cxn, 0, sizeof(struct connection));
+      cxn->socket = socket;
+      cxn->env = env;
+   } else {
+      fdarr_cntl(FDARR_REMOVE, cxn->socket);
+      close(cxn->socket);
+      connections->erase(cxn->socket);
+      free(cxn);
+   }
+
    return FDARR_MODIFIED;
 }
 
@@ -488,7 +480,6 @@ static int json_request(struct connection* cxn) {
       debug(DEBUG_WARNING, "Unsupported JSON operation requested: %s\n", str);
       return error_response(&cxn->response, RESPONSE_NOT_FOUND);
    }
-   
 
    debug(DEBUG_INFO, "Doing some JSON action.\n");
    return json_response(&cxn->response, cmd);
@@ -566,40 +557,6 @@ static int process_request(struct connection* cxn) {
    } else {
       return file_request(cxn);
    }
-}
-
-// If there was an entry for the file in the file descriptor table, then
-// it is also open and in other data structures, so remove it from them.
-// If it was not in the table then erase will simply return 0. A file
-// descriptor may not be set in the connection because we might have done
-// an internal response such as a 404 in response to the request, instead of
-// sending a file.
-static void reset_connection(struct connection* cxn) {
-   int socket = cxn->socket;
-   struct env env;
-
-   debug(DEBUG_INFO, "Resetting connection\n");
-   env = cxn->env;
-   fdarr_cntl(FDARR_MODIFY, cxn->socket, POLLIN);
-   if (connections->erase(cxn->file)) {
-      fdarr_cntl(FDARR_REMOVE, cxn->file);
-      close(cxn->file);
-   }
-   memset(cxn, 0, sizeof(struct connection));
-   cxn->socket = socket;
-   cxn->env = env;
-}
-
-static void close_connection(struct connection* cxn) {
-   debug(DEBUG_INFO, "Closing connection...\n");
-   fdarr_cntl(FDARR_REMOVE, cxn->socket);
-   if (connections->erase(cxn->file)) {
-      fdarr_cntl(FDARR_REMOVE, cxn->file);
-      close(cxn->file);
-   }
-   close(cxn->socket);
-   connections->erase(cxn->socket);
-   free(cxn);
 }
 
 static enum REQUEST_STATE fill_request_buffer(int socket,

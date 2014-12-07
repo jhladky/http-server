@@ -93,7 +93,6 @@ enum CXN_STATE {
    ST_REQUEST,
    ST_INTERNAL,
    ST_CGI_FIL,
-   ST_FORTUNE_READ,
    ST_RESPONSE_HEAD,
    ST_RESPONSE_READ,
    ST_RESPONSE_WRIT
@@ -182,7 +181,6 @@ static int cgi_response(struct response* response, enum CGI_CMD cmd);
 static int json_response(struct response* response, enum JSON_CMD cmd);
 static int error_response(struct response* response, enum RESPONSE_TYPE type);
 static int generate_listing(char* filepath, struct response* response);
-static int finish_response(struct connection* cxn);
 static int fdarr_cntl(enum FDARR_CMD cmd, ...);
 static int do_cgi(struct connection* cxn);
 static int do_fortune(struct connection* cxn);
@@ -197,8 +195,7 @@ static int process_cxsock_events(struct connection* cxn, short revents);
 static int url_decode(char* url);
 static void make_response_header(struct response* response);
 static void print_request(struct request* request);
-static void close_connection(struct connection* cxn);
-static void reset_connection(struct connection* cxn);
+static int finish_response(struct connection* cxn, bool keepAlive);
 static void clean_exit(int unused);
 //static void wait_for_child(int unused);
 static void add_handler(int signal, void (*handlerFunc)(int));
